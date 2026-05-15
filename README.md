@@ -1,30 +1,44 @@
-# netatmo-to-zo
+# netatmo-to-zivyobraz
 
-Fetches data from a [Netatmo](https://dev.netatmo.com) weather station and pushes it to [Živý obraz](https://zivyobraz.eu) as custom values.
+Fetches data from a [Netatmo](https://dev.netatmo.com) weather station and Healthy Home Coach, and pushes it to [Živý obraz](https://zivyobraz.eu) as custom values.
 
 ## Values pushed to Živý obraz
 
+### Weather Station
+
 | Key | Description |
 |-----|-------------|
-| `netatmo_outdoor_temp` | Outdoor temperature (°C) |
-| `netatmo_outdoor_humidity` | Outdoor humidity (%) |
 | `netatmo_indoor_temp` | Indoor temperature (°C) |
 | `netatmo_indoor_humidity` | Indoor humidity (%) |
 | `netatmo_indoor_co2` | CO₂ (ppm) |
 | `netatmo_pressure` | Pressure (mbar) |
+| `netatmo_outdoor_temp` | Outdoor temperature (°C) |
+| `netatmo_outdoor_humidity` | Outdoor humidity (%) |
 | `netatmo_rain_current` | Current rainfall (mm/h) |
 | `netatmo_rain_1h` | Rainfall last hour (mm) |
 | `netatmo_rain_24h` | Rainfall last 24 h (mm) |
+
+### Healthy Home Coach
+
+Keys are derived from the device name (e.g. a device named "Living Room" → `netatmo_living_room_*`).
+
+| Key | Description |
+|-----|-------------|
+| `netatmo_{slug}_temp` | Temperature (°C) |
+| `netatmo_{slug}_humidity` | Humidity (%) |
+| `netatmo_{slug}_co2` | CO₂ (ppm) |
+| `netatmo_{slug}_noise` | Noise (dB) |
+| `netatmo_{slug}_health` | Health index (0 Healthy – 4 Unhealthy) |
 
 ## Deployment (Docker Swarm)
 
 Add to `stacks/home/docker-compose.yml`:
 
 ```yaml
-  netatmo-to-zo:
-    image: ghcr.io/srameko/netatmo-to-zo:latest
+  netatmo-to-zivyobraz:
+    image: ghcr.io/srameko/netatmo-to-zivyobraz:latest
     volumes:
-      - /volume1/docker/netatmo-to-zo:/data
+      - /volume1/docker/netatmo-to-zivyobraz:/data
     environment:
       - NETATMO_CLIENT_ID=${NETATMO_CLIENT_ID}
       - NETATMO_CLIENT_SECRET=${NETATMO_CLIENT_SECRET}
