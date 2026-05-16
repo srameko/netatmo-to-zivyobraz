@@ -32,6 +32,8 @@ ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
+LOCATION_LAT = float(os.environ.get("LOCATION_LAT", "0"))
+LOCATION_LON = float(os.environ.get("LOCATION_LON", "0"))
 
 TOKEN_FILE = "/data/netatmo_tokens.json"
 
@@ -94,10 +96,62 @@ def fetch_homecoach_data(access_token: str) -> dict:
     return r.json()
 
 
+def fetch_wind_speed() -> float:
+    """Fetch current wind speed (km/h) from Open-Meteo. Returns 0 on failure."""
+    if not LOCATION_LAT or not LOCATION_LON:
+        log.warning("LOCATION_LAT/LON not set, skipping wind fetch")
+        return 0.0
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude":  LOCATION_LAT,
+                "longitude": LOCATION_LON,
+                "current":   "wind_speed_10m",
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        wind = r.json()["current"]["wind_speed_10m"]
+        log.info("Wind speed: %s km/h", wind)
+        return float(wind)
+    except Exception as e:
+        log.warning("Failed to fetch wind speed: %s", e)
+        return 0.0
+
+
 def _slugify(name: str) -> str:
     normalized = unicodedata.normalize("NFKD", name)
     ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
     return ascii_name.lower().strip().replace(" ", "_").replace("-", "_")
+
+
+def feels_like(temp_c: float, humidity: int, wind_kmh: float = 0.0) -> float:
+    """
+    Wind chill for temp <= 10C and wind > 4.8 km/h (Environment Canada),
+    heat index (Steadman) for temp >= 27C,
+    otherwise returns temp as-is.
+    """
+    if temp_c <= 10 and wind_kmh > 4.8:
+        wc = (13.12
+              + 0.6215 * temp_c
+              - 11.37 * wind_kmh ** 0.16
+              + 0.3965 * temp_c * wind_kmh ** 0.16)
+        return round(wc, 1)
+    elif temp_c >= 27:
+        t = temp_c
+        h = humidity
+        hi = (-8.78469475556
+              + 1.61139411 * t
+              + 2.33854883889 * h
+              - 0.14611605 * t * h
+              - 0.012308094 * t ** 2
+              - 0.0164248277778 * h ** 2
+              + 0.002211732 * t ** 2 * h
+              + 0.00072546 * t * h ** 2
+              - 0.000003582 * t ** 2 * h ** 2)
+        return round(hi, 1)
+    return temp_c
 
 
 def parse_measurements(data: dict) -> dict:
@@ -176,14 +230,19 @@ def ask_llm(prompt: str) -> str:
     return response
 
 
-def ask_llm_clothing(values: dict) -> str:
+def ask_llm_clothing(values: dict, wind_kmh: float) -> str:
     temp     = values.get("netatmo_outdoor_temp", "?")
     humidity = values.get("netatmo_outdoor_humidity", "?")
     rain_1h  = values.get("netatmo_rain_1h", 0)
     rain_str = f"{rain_1h}mm rain" if rain_1h > 0 else "no rain"
 
+    fl = (feels_like(temp, humidity, wind_kmh)
+          if isinstance(temp, (int, float)) and isinstance(humidity, (int, float))
+          else temp)
+
     prompt = (
-        f"Outside: {temp}C, humidity {humidity}%, {rain_str}. "
+        f"Outside: {temp}C (feels like {fl}C), humidity {humidity}%, "
+        f"wind {wind_kmh}km/h, {rain_str}. "
         "What to wear? One sentence, max 8 words, reply in English."
     )
     return ask_llm(prompt)
@@ -231,7 +290,9 @@ def main():
 
         log.info("Measurements: %s", values)
 
-        values["llm_obleceni"] = ask_llm_clothing(values)
+        wind_kmh = fetch_wind_speed()
+
+        values["llm_obleceni"] = ask_llm_clothing(values, wind_kmh)
         values["llm_vetrani"]  = ask_llm_ventilation(values)
 
         push_to_zo(values)
