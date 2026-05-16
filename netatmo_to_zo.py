@@ -35,6 +35,16 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
 LOCATION_LAT = float(os.environ.get("LOCATION_LAT", "0"))
 LOCATION_LON = float(os.environ.get("LOCATION_LON", "0"))
 
+# MAC -> room name mapping, e.g. "70:ee:50:83:3e:ce=Pracovna,70:ee:50:83:2e:3e=Obyvak"
+HOMECOACH_MAP = {
+    k.strip(): v.strip()
+    for k, v in (
+        pair.split("=", 1)
+        for pair in os.environ.get("HOMECOACH_MAP", "").split(",")
+        if "=" in pair
+    )
+}
+
 TOKEN_FILE = "/data/netatmo_tokens.json"
 
 
@@ -190,24 +200,42 @@ def parse_measurements(data: dict) -> dict:
 
 
 def parse_homecoach_measurements(data: dict) -> dict:
+    """
+    Returns measurements keyed by room name (from HOMECOACH_MAP) or MAC suffix.
+    Also returns a list of per-device dicts for LLM ventilation queries.
+    """
     values = {}
+    coaches = []
+
     for device in data.get("body", {}).get("devices", []):
         dash = device.get("dashboard_data", {})
-        slug = _slugify(device.get("name", "homecoach"))
+        mac  = device.get("_id", "00:00:00:00:00:00")
+
+        # Resolve room name from map, fall back to last 4 MAC chars
+        room_raw = HOMECOACH_MAP.get(mac, mac.replace(":", "_")[-4:])
+        slug     = _slugify(room_raw)
+        log.info("Coach device: id=%s room=%s slug=%s", mac, room_raw, slug)
+
+        entry = {"slug": slug, "room": room_raw}
 
         if "Temperature" in dash:
             values[f"netatmo_{slug}_temp"]     = round(dash["Temperature"], 1)
+            entry["temp"] = round(dash["Temperature"], 1)
         if "Humidity" in dash:
             values[f"netatmo_{slug}_humidity"] = dash["Humidity"]
+            entry["humidity"] = dash["Humidity"]
         if "CO2" in dash:
             values[f"netatmo_{slug}_co2"]      = dash["CO2"]
+            entry["co2"] = dash["CO2"]
         if "Noise" in dash:
             values[f"netatmo_{slug}_noise"]    = dash["Noise"]
         if "health_idx" in dash:
             # 0=Healthy, 1=Fine, 2=Fair, 3=Poor, 4=Unhealthy
             values[f"netatmo_{slug}_health"]   = dash["health_idx"]
 
-    return values
+        coaches.append(entry)
+
+    return values, coaches
 
 
 def ask_llm(prompt: str) -> str:
@@ -248,19 +276,15 @@ def ask_llm_clothing(values: dict, wind_kmh: float) -> str:
     return ask_llm(prompt)
 
 
-def ask_llm_ventilation(values: dict) -> str:
-    co2 = next(
-        (v for k, v in values.items() if k.endswith("_co2") and "indoor" not in k),
-        values.get("netatmo_indoor_co2", "?"),
-    )
-    humidity = next(
-        (v for k, v in values.items() if k.endswith("_humidity") and "outdoor" not in k),
-        values.get("netatmo_indoor_humidity", "?"),
-    )
-    outdoor_temp = values.get("netatmo_outdoor_temp", "?")
+def ask_llm_ventilation(coach: dict, outdoor_temp: float) -> str:
+    """Ask LLM whether to ventilate for a specific room/coach."""
+    co2      = coach.get("co2", "?")
+    humidity = coach.get("humidity", "?")
+    room     = coach.get("room", "room")
 
     prompt = (
-        f"Indoor: CO2 {co2}ppm, humidity {humidity}%. Outside: {outdoor_temp}C. "
+        f"{room} - Indoor: CO2 {co2}ppm, humidity {humidity}%. "
+        f"Outside: {outdoor_temp}C. "
         "Should I ventilate? One sentence, max 8 words, reply in English."
     )
     return ask_llm(prompt)
@@ -286,14 +310,20 @@ def main():
 
         values = {}
         values.update(parse_measurements(station_data))
-        values.update(parse_homecoach_measurements(coach_data))
+
+        coach_values, coaches = parse_homecoach_measurements(coach_data)
+        values.update(coach_values)
 
         log.info("Measurements: %s", values)
 
-        wind_kmh = fetch_wind_speed()
+        wind_kmh     = fetch_wind_speed()
+        outdoor_temp = values.get("netatmo_outdoor_temp", 20.0)
 
         values["llm_obleceni"] = ask_llm_clothing(values, wind_kmh)
-        values["llm_vetrani"]  = ask_llm_ventilation(values)
+
+        for coach in coaches:
+            slug = coach["slug"]
+            values[f"llm_vetrani_{slug}"] = ask_llm_ventilation(coach, outdoor_temp)
 
         push_to_zo(values)
     except requests.HTTPError as e:
