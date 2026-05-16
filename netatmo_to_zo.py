@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Netatmo -> Zivy obraz
-Fetches data from the Netatmo API and pushes it to Zivy obraz as custom values.
+Fetches data from the Netatmo API, asks an LLM for clothing and ventilation
+advice, and pushes everything to Zivy obraz as custom values.
 Intended to run every 15 minutes (Docker CMD loop).
 """
 
@@ -28,6 +29,9 @@ NETATMO_CLIENT_ID     = _secret("NETATMO_CLIENT_ID")
 NETATMO_CLIENT_SECRET = _secret("NETATMO_CLIENT_SECRET")
 NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
 ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
+
+OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
 
 TOKEN_FILE = "/data/netatmo_tokens.json"
 
@@ -102,7 +106,6 @@ def parse_measurements(data: dict) -> dict:
     for device in data.get("body", {}).get("devices", []):
         dash = device.get("dashboard_data", {})
 
-        # Indoor base station
         if "Temperature" in dash:
             values["netatmo_indoor_temp"]     = round(dash["Temperature"], 1)
         if "Humidity" in dash:
@@ -154,6 +157,57 @@ def parse_homecoach_measurements(data: dict) -> dict:
     return values
 
 
+def ask_llm(prompt: str) -> str:
+    log.info("Asking LLM (%s)...", OLLAMA_MODEL)
+    r = requests.post(
+        f"{OLLAMA_URL}/api/generate",
+        json={
+            "model":  OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.3},
+        },
+        timeout=120,
+    )
+    r.raise_for_status()
+    response = r.json()["response"].strip()
+    log.info("LLM response: %s", response)
+    return response
+
+
+def ask_llm_clothing(values: dict) -> str:
+    temp     = values.get("netatmo_outdoor_temp", "?")
+    humidity = values.get("netatmo_outdoor_humidity", "?")
+    rain_1h  = values.get("netatmo_rain_1h", 0)
+
+    prompt = (
+        f"Venkovní podmínky: teplota {temp}°C, vlhkost {humidity}%, "
+        f"srážky za poslední hodinu {rain_1h} mm. "
+        "Doporuč co si vzít ven. Odpověz jednou větou, max 10 slov, česky."
+    )
+    return ask_llm(prompt)
+
+
+def ask_llm_ventilation(values: dict) -> str:
+    # Prefer homecoach CO2/humidity over indoor base station
+    co2 = next(
+        (v for k, v in values.items() if k.endswith("_co2") and "indoor" not in k),
+        values.get("netatmo_indoor_co2", "?"),
+    )
+    humidity = next(
+        (v for k, v in values.items() if k.endswith("_humidity") and "outdoor" not in k),
+        values.get("netatmo_indoor_humidity", "?"),
+    )
+    outdoor_temp = values.get("netatmo_outdoor_temp", "?")
+
+    prompt = (
+        f"Vnitřní vzduch: CO2 {co2} ppm, vlhkost {humidity}%. "
+        f"Venku je {outdoor_temp}°C. "
+        "Mám větrat? Odpověz jednou větou, max 10 slov, česky."
+    )
+    return ask_llm(prompt)
+
+
 def push_to_zo(values: dict):
     if not values:
         log.warning("No values to push")
@@ -177,6 +231,10 @@ def main():
         values.update(parse_homecoach_measurements(coach_data))
 
         log.info("Measurements: %s", values)
+
+        values["llm_obleceni"] = ask_llm_clothing(values)
+        values["llm_vetrani"]  = ask_llm_ventilation(values)
+
         push_to_zo(values)
     except requests.HTTPError as e:
         log.error("HTTP %s: %s", e.response.status_code, e.response.text)
