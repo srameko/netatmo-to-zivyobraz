@@ -162,9 +162,10 @@ def ask_llm(prompt: str) -> str:
     r = requests.post(
         f"{OLLAMA_URL}/api/generate",
         json={
-            "model":  OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
+            "model":   OLLAMA_MODEL,
+            "prompt":  prompt,
+            "stream":  False,
+            "think":   False,
             "options": {"temperature": 0.3},
         },
         timeout=120,
@@ -183,7 +184,7 @@ def ask_llm_clothing(values: dict) -> str:
     prompt = (
         f"Venkovní podmínky: teplota {temp}°C, vlhkost {humidity}%, "
         f"srážky za poslední hodinu {rain_1h} mm. "
-        "Doporuč co si vzít ven. Odpověz jednou větou, max 10 slov, česky."
+        "Doporuč co si vzít na sebe ven. Odpověz jednou větou, max 10 slov, česky."
     )
     return ask_llm(prompt)
 
