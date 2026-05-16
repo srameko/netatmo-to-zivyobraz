@@ -13,10 +13,20 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-NETATMO_CLIENT_ID     = os.environ["NETATMO_CLIENT_ID"]
-NETATMO_CLIENT_SECRET = os.environ["NETATMO_CLIENT_SECRET"]
-NETATMO_REFRESH_TOKEN = os.environ["NETATMO_REFRESH_TOKEN"]
-ZO_IMPORT_KEY         = os.environ["ZO_IMPORT_KEY"]
+
+def _secret(name: str) -> str:
+    """Read from Docker Swarm secret file if present, fall back to env var."""
+    path = f"/run/secrets/{name}"
+    if os.path.exists(path):
+        with open(path) as f:
+            return f.read().strip()
+    return os.environ[name]
+
+
+NETATMO_CLIENT_ID     = _secret("NETATMO_CLIENT_ID")
+NETATMO_CLIENT_SECRET = _secret("NETATMO_CLIENT_SECRET")
+NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
+ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
 
 TOKEN_FILE = "/data/netatmo_tokens.json"
 
