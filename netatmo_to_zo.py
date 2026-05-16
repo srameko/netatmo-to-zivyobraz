@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import requests
+import unicodedata
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -90,8 +91,10 @@ def fetch_homecoach_data(access_token: str) -> dict:
 
 
 def _slugify(name: str) -> str:
-    """Convert device name to a safe key, e.g. 'Living Room' -> 'living_room'."""
-    return name.lower().strip().replace(" ", "_").replace("-", "_")
+    """Convert device name to a safe key, e.g. 'Obývák' -> 'obyvak'."""
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
+    return ascii_name.lower().strip().replace(" ", "_").replace("-", "_")
 
 
 def parse_measurements(data: dict) -> dict:
