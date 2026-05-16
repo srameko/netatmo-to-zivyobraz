@@ -95,7 +95,6 @@ def fetch_homecoach_data(access_token: str) -> dict:
 
 
 def _slugify(name: str) -> str:
-    """Convert device name to a safe key, e.g. 'Obývák' -> 'obyvak'."""
     normalized = unicodedata.normalize("NFKD", name)
     ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
     return ascii_name.lower().strip().replace(" ", "_").replace("-", "_")
@@ -162,11 +161,12 @@ def ask_llm(prompt: str) -> str:
     r = requests.post(
         f"{OLLAMA_URL}/api/generate",
         json={
-            "model":   OLLAMA_MODEL,
-            "prompt":  prompt,
-            "stream":  False,
-            "think":   False,
-            "options": {"temperature": 0.3},
+            "model":      OLLAMA_MODEL,
+            "prompt":     prompt,
+            "stream":     False,
+            "think":      False,
+            "keep_alive": -1,
+            "options":    {"temperature": 0.3},
         },
         timeout=120,
     )
@@ -180,17 +180,16 @@ def ask_llm_clothing(values: dict) -> str:
     temp     = values.get("netatmo_outdoor_temp", "?")
     humidity = values.get("netatmo_outdoor_humidity", "?")
     rain_1h  = values.get("netatmo_rain_1h", 0)
+    rain_str = f"{rain_1h}mm rain" if rain_1h > 0 else "no rain"
 
     prompt = (
-        f"Venkovní podmínky: teplota {temp}°C, vlhkost {humidity}%, "
-        f"srážky za poslední hodinu {rain_1h} mm. "
-        "Doporuč co si vzít na sebe ven. Odpověz jednou větou, max 10 slov, česky."
+        f"Outside: {temp}C, humidity {humidity}%, {rain_str}. "
+        "What to wear? One sentence, max 8 words, reply in English."
     )
     return ask_llm(prompt)
 
 
 def ask_llm_ventilation(values: dict) -> str:
-    # Prefer homecoach CO2/humidity over indoor base station
     co2 = next(
         (v for k, v in values.items() if k.endswith("_co2") and "indoor" not in k),
         values.get("netatmo_indoor_co2", "?"),
@@ -202,9 +201,8 @@ def ask_llm_ventilation(values: dict) -> str:
     outdoor_temp = values.get("netatmo_outdoor_temp", "?")
 
     prompt = (
-        f"Vnitřní vzduch: CO2 {co2} ppm, vlhkost {humidity}%. "
-        f"Venku je {outdoor_temp}°C. "
-        "Mám větrat? Odpověz jednou větou, max 10 slov, česky."
+        f"Indoor: CO2 {co2}ppm, humidity {humidity}%. Outside: {outdoor_temp}C. "
+        "Should I ventilate? One sentence, max 8 words, reply in English."
     )
     return ask_llm(prompt)
 
