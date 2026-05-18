@@ -138,19 +138,21 @@ def _slugify(name: str) -> str:
 
 def feels_like(temp_c: float, humidity: int, wind_kmh: float = 0.0) -> float:
     """
-    Wind chill for temp <= 10C and wind > 4.8 km/h (Environment Canada),
-    heat index (Steadman) for temp >= 27C,
-    otherwise returns temp as-is.
+    Composite feels-like matching Czech meteorological practice (ČHMÚ):
+    - Wind chill (WMO/Environment Canada) for temp ≤ 14°C and wind > 4.8 km/h
+    - Heat index (Rothfusz) for temp ≥ 27°C and humidity ≥ 40%
+    - Otherwise raw temperature (no reliable formula for moderate conditions)
     """
-    if temp_c <= 10 and wind_kmh > 4.8:
+    if temp_c <= 14 and wind_kmh > 4.8:
         wc = (13.12
               + 0.6215 * temp_c
               - 11.37 * wind_kmh ** 0.16
               + 0.3965 * temp_c * wind_kmh ** 0.16)
-        return round(wc, 1)
-    elif temp_c >= 27:
-        t = temp_c
-        h = humidity
+        if wc < temp_c:
+            return round(wc, 1)
+
+    if temp_c >= 27 and humidity >= 40:
+        t, h = temp_c, humidity
         hi = (-8.78469475556
               + 1.61139411 * t
               + 2.33854883889 * h
@@ -161,7 +163,43 @@ def feels_like(temp_c: float, humidity: int, wind_kmh: float = 0.0) -> float:
               + 0.00072546 * t * h ** 2
               - 0.000003582 * t ** 2 * h ** 2)
         return round(hi, 1)
+
     return temp_c
+
+
+def _health_score(co2: int, humidity: int) -> int:
+    """Derive 0-4 health score from CO2 and humidity, mirroring Netatmo Home Coach scale."""
+    if co2 < 800:       co2_score = 0
+    elif co2 < 1000:    co2_score = 1
+    elif co2 < 1400:    co2_score = 2
+    elif co2 < 2000:    co2_score = 3
+    else:               co2_score = 4
+
+    if 30 <= humidity <= 60:    hum_score = 0
+    elif 25 <= humidity <= 70:  hum_score = 1
+    elif 20 <= humidity <= 75:  hum_score = 2
+    elif 15 <= humidity <= 80:  hum_score = 3
+    else:                       hum_score = 4
+
+    return max(co2_score, hum_score)
+
+
+def health_label(score: int, outdoor_temp: float) -> str:
+    """Czech air quality label with ventilation advice based on outdoor temperature."""
+    labels = {0: "Zdravý", 1: "Dobrý", 2: "Přijatelný", 3: "Špatný", 4: "Nezdravý"}
+    label = labels.get(score, str(score))
+
+    if score <= 1:
+        return label
+
+    if outdoor_temp < -10 or outdoor_temp > 35:
+        vent = "větrejte krátce"
+    elif score >= 4:
+        vent = "větrejte ihned"
+    else:
+        vent = "větrejte"
+
+    return f"{label} – {vent}"
 
 
 def parse_measurements(data: dict) -> dict:
@@ -240,8 +278,7 @@ def parse_homecoach_measurements(data: dict) -> dict:
         if "Noise" in dash:
             values[f"netatmo_{slug}_noise"]    = dash["Noise"]
         if "health_idx" in dash:
-            # 0=Healthy, 1=Fine, 2=Fair, 3=Poor, 4=Unhealthy
-            values[f"netatmo_{slug}_health"]   = dash["health_idx"]
+            entry["health_idx"] = dash["health_idx"]
 
         coaches.append(entry)
 
@@ -329,7 +366,24 @@ def main():
         # Use Netatmo wind if available, otherwise fall back to Open-Meteo
         wind_kmh = float(values.get("netatmo_wind_speed", 0) or fetch_wind_speed())
 
+        outdoor_temp     = values.get("netatmo_outdoor_temp", 20.0)
+        outdoor_humidity = values.get("netatmo_outdoor_humidity", 50)
+        if isinstance(outdoor_temp, (int, float)) and isinstance(outdoor_humidity, (int, float)):
+            values["netatmo_outdoor_feels_like"] = feels_like(outdoor_temp, outdoor_humidity, wind_kmh)
+
         outdoor_temp = values.get("netatmo_outdoor_temp", 20.0)
+
+        # Indoor module health index (computed from CO2 + humidity)
+        co2 = values.get("netatmo_indoor_co2")
+        hum = values.get("netatmo_indoor_humidity")
+        if isinstance(co2, int) and isinstance(hum, int):
+            values["netatmo_indoor_health"] = health_label(_health_score(co2, hum), outdoor_temp)
+
+        # Home Coach health index (provided by Netatmo API)
+        for coach in coaches:
+            slug = coach["slug"]
+            if "health_idx" in coach:
+                values[f"netatmo_{slug}_health"] = health_label(coach["health_idx"], outdoor_temp)
 
         values["llm_obleceni"] = ask_llm_clothing(values, wind_kmh)
 
