@@ -186,7 +186,7 @@ def _health_score(co2: int, humidity: int) -> int:
 
 def health_label(score: int, outdoor_temp: float) -> str:
     """Czech air quality label with ventilation advice based on outdoor temperature."""
-    labels = {0: "Zdravý", 1: "Dobrý", 2: "Přijatelný", 3: "Špatný", 4: "Nezdravý"}
+    labels = {0: "Zdravá", 1: "Dobrá", 2: "Přijatelná", 3: "Špatná", 4: "Nezdravá"}
     label = labels.get(score, str(score))
 
     if score <= 1:
