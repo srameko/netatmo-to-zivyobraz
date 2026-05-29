@@ -166,7 +166,7 @@ class TestHealthScore:
 
 class TestHealthLabel:
     @pytest.mark.parametrize("score,label", [
-        (0, "Zdravý"), (1, "Dobrý"), (2, "Přijatelný"), (3, "Špatný"), (4, "Nezdravý"),
+        (0, "Zdravá"), (1, "Dobrá"), (2, "Přijatelná"), (3, "Špatná"), (4, "Nezdravá"),
     ])
     def test_known_scores(self, score, label):
         assert ntz.health_label(score) == label
