@@ -264,7 +264,7 @@ def _health_score(co2: int, humidity: int) -> int:
 
 def health_label(score: int) -> str:
     """Czech one-word air quality label for the given 0–4 score."""
-    return {0: "Zdravý", 1: "Dobrý", 2: "Přijatelný", 3: "Špatný", 4: "Nezdravý"}.get(score, str(score))
+    return {0: "Zdravá", 1: "Dobrá", 2: "Přijatelná", 3: "Špatná", 4: "Nezdravá"}.get(score, str(score))
 
 
 def parse_measurements(data: dict) -> dict:
