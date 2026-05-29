@@ -27,8 +27,8 @@ OpenAQ API    → AQI from ČHMÚ station Brno-Svatoplukova → Živý obraz
 - Note: Netatmo outdoor AQI is NOT used — it comes from The Weather Company model, not the sensor
 
 ### Air Quality — OpenAQ / ČHMÚ
-- Station: **Brno-Svatoplukova** (ČHMÚ)
-- OpenAQ API v3: `https://api.openaq.org/v3/`
+- Station: **Brno - Dětská nemocnice** (ČHMÚ), OpenAQ location ID 4425
+- OpenAQ API v3: `https://api.openaq.org/v3/`, endpoint `/v3/locations/{id}/sensors`
 - Fetch latest PM2.5, PM10, NO2, O3 values for this station
 - Push as `openaq_pm25`, `openaq_pm10`, `openaq_no2`, `openaq_o3` and `openaq_aqi` (EAQI label) to Živý obraz
 - If unavailable: skip push silently, do not push empty/null values

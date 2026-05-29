@@ -40,7 +40,7 @@ Keys are derived from the device name configured in `HOMECOACH_MAP` (e.g. `Praco
 
 ### Air Quality — ČHMÚ via OpenAQ
 
-Real measurements from the nearest ČHMÚ station (Brno-Svatoplukova).
+Real measurements from the nearest ČHMÚ station (Brno - Dětská nemocnice, OpenAQ location ID 4425).
 Netatmo's built-in AQI is NOT used — it is a model from The Weather Company, not a real sensor.
 
 | Key           | Description          |
