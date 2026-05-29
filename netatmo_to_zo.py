@@ -16,12 +16,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 
-def _secret(name: str) -> str:
-    """Read from Docker Swarm secret file if present, fall back to env var."""
+def _secret(name: str, default: str | None = None) -> str:
+    """Read from Docker Swarm secret file if present, fall back to env var or default."""
     path = f"/run/secrets/{name}"
     if os.path.exists(path):
         with open(path) as f:
             return f.read().strip()
+    if default is not None:
+        return os.environ.get(name, default)
     return os.environ[name]
 
 
@@ -30,7 +32,7 @@ NETATMO_CLIENT_SECRET = _secret("NETATMO_CLIENT_SECRET")
 NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
 ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
 
-OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://rpi.home:11434")
+OLLAMA_URL      = _secret("OLLAMA_URL", "http://rpi.home:11434")
 OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
 LOCATION_LAT    = float(os.environ.get("LOCATION_LAT", "0"))
 LOCATION_LON    = float(os.environ.get("LOCATION_LON", "0"))
