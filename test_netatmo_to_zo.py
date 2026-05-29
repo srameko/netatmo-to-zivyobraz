@@ -142,32 +142,32 @@ class TestHealthScore:
 
 class TestHealthLabel:
     def test_score_0_and_1_have_no_ventilation_advice(self):
-        assert ntz.health_label(0, 20.0) == "Zdravá"
-        assert ntz.health_label(1, 20.0) == "Dobrá"
+        assert ntz.health_label(0, 20.0) == "Zdravý"
+        assert ntz.health_label(1, 20.0) == "Dobrý"
 
     def test_normal_ventilation_advice(self):
-        assert ntz.health_label(2, 20.0) == "Přijatelná – větrejte"
-        assert ntz.health_label(3, 20.0) == "Špatná – větrejte"
+        assert ntz.health_label(2, 20.0) == "Přijatelný – větrejte"
+        assert ntz.health_label(3, 20.0) == "Špatný – větrejte"
 
     def test_score_4_urgent_ventilation(self):
-        assert ntz.health_label(4, 20.0) == "Nezdravá – větrejte ihned"
+        assert ntz.health_label(4, 20.0) == "Nezdravý – větrejte ihned"
 
     def test_extreme_cold_gives_short_ventilation(self):
-        assert ntz.health_label(3, -11.0) == "Špatná – větrejte krátce"
+        assert ntz.health_label(3, -11.0) == "Špatný – větrejte krátce"
 
     def test_extreme_heat_gives_short_ventilation(self):
-        assert ntz.health_label(2, 36.0) == "Přijatelná – větrejte krátce"
+        assert ntz.health_label(2, 36.0) == "Přijatelný – větrejte krátce"
 
     def test_extreme_cold_overrides_score_4_urgency(self):
-        assert ntz.health_label(4, -15.0) == "Nezdravá – větrejte krátce"
+        assert ntz.health_label(4, -15.0) == "Nezdravý – větrejte krátce"
 
     def test_boundary_minus_10_is_not_extreme(self):
         # < -10 required; exactly -10 is not extreme
-        assert ntz.health_label(3, -10.0) == "Špatná – větrejte"
+        assert ntz.health_label(3, -10.0) == "Špatný – větrejte"
 
     def test_boundary_35_is_not_extreme(self):
         # > 35 required; exactly 35 is not extreme
-        assert ntz.health_label(2, 35.0) == "Přijatelná – větrejte"
+        assert ntz.health_label(2, 35.0) == "Přijatelný – větrejte"
 
 
 # ── _slugify ──────────────────────────────────────────────────────────────────

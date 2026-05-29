@@ -30,7 +30,7 @@ NETATMO_CLIENT_SECRET = _secret("NETATMO_CLIENT_SECRET")
 NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
 ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
 
-OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://rpi.home:11434")
 OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
 LOCATION_LAT    = float(os.environ.get("LOCATION_LAT", "0"))
 LOCATION_LON    = float(os.environ.get("LOCATION_LON", "0"))
@@ -262,7 +262,7 @@ def _health_score(co2: int, humidity: int) -> int:
 
 def health_label(score: int, outdoor_temp: float) -> str:
     """Czech air quality label with ventilation advice based on outdoor temperature."""
-    labels = {0: "Zdravá", 1: "Dobrá", 2: "Přijatelná", 3: "Špatná", 4: "Nezdravá"}
+    labels = {0: "Zdravý", 1: "Dobrý", 2: "Přijatelný", 3: "Špatný", 4: "Nezdravý"}
     label = labels.get(score, str(score))
 
     if score <= 1:
@@ -381,24 +381,6 @@ def ask_llm(prompt: str) -> str:
     return response
 
 
-def ask_llm_clothing(values: dict, wind_kmh: float) -> str:
-    temp     = values.get("netatmo_outdoor_temp", "?")
-    humidity = values.get("netatmo_outdoor_humidity", "?")
-    rain_1h  = values.get("netatmo_rain_1h", 0)
-    rain_str = f"{rain_1h}mm rain" if rain_1h > 0 else "no rain"
-
-    fl = (feels_like(temp, humidity, wind_kmh)
-          if isinstance(temp, (int, float)) and isinstance(humidity, (int, float))
-          else temp)
-
-    prompt = (
-        f"Outside: {temp}C (feels like {fl}C), humidity {humidity}%, "
-        f"wind {wind_kmh}km/h, {rain_str}. "
-        "What to wear? One sentence, max 8 words, reply in English."
-    )
-    return ask_llm(prompt)
-
-
 def ask_llm_ventilation(coach: dict, outdoor_temp: float) -> str:
     """Ask LLM whether to ventilate for a specific room/coach."""
     co2      = coach.get("co2", "?")
@@ -406,9 +388,9 @@ def ask_llm_ventilation(coach: dict, outdoor_temp: float) -> str:
     room     = coach.get("room", "room")
 
     prompt = (
-        f"{room} - Indoor: CO2 {co2}ppm, humidity {humidity}%. "
-        f"Outside: {outdoor_temp}C. "
-        "Should I ventilate? One sentence, max 8 words, reply in English."
+        f"{room} - interiér: CO2 {co2} ppm, vlhkost {humidity} %. "
+        f"Exteriér: {outdoor_temp} °C. "
+        "Mám větrat? Jedna věta, stručně, prakticky, česky."
     )
     return ask_llm(prompt)
 
@@ -463,8 +445,6 @@ def main():
             slug = coach["slug"]
             if "health_idx" in coach:
                 values[f"netatmo_{slug}_health"] = health_label(coach["health_idx"], outdoor_temp)
-
-        values["llm_obleceni"] = ask_llm_clothing(values, wind_kmh)
 
         for coach in coaches:
             slug = coach["slug"]
