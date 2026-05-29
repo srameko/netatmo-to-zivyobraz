@@ -6,7 +6,7 @@ Run with: pytest test_netatmo_to_zo.py
 
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 import requests
@@ -431,6 +431,67 @@ class TestTokenManagement:
 
 
 # ── ask_llm ───────────────────────────────────────────────────────────────────
+
+class TestAskLlmVentilation:
+    def test_prompt_contains_co2_humidity_and_outdoor_temp(self):
+        coach = {"slug": "pracovna", "room": "Pracovna", "co2": 1200, "humidity": 55}
+        with patch.object(ntz, "ask_llm", return_value="Větrejte.") as mock_llm:
+            result = ntz.ask_llm_ventilation(coach, 10.0)
+        assert result == "Větrejte."
+        prompt = mock_llm.call_args[0][0]
+        assert "1200" in prompt
+        assert "55" in prompt
+        assert "10" in prompt
+
+    def test_prompt_requests_czech_output(self):
+        coach = {"slug": "x", "room": "X", "co2": 800, "humidity": 50}
+        with patch.object(ntz, "ask_llm", return_value="OK") as mock_llm:
+            ntz.ask_llm_ventilation(coach, 20.0)
+        assert "česky" in mock_llm.call_args[0][0]
+
+
+class TestGetAccessToken:
+    def test_refreshes_persists_and_returns_access_token(self, tmp_path):
+        token_file = tmp_path / "tokens.json"
+        token_file.write_text(json.dumps({"refresh_token": "old_refresh"}))
+        resp = _mock_response({"access_token": "new_access", "refresh_token": "new_refresh"})
+        with patch.object(ntz, "TOKEN_FILE", str(token_file)), \
+             patch("requests.post", return_value=resp):
+            token = ntz.get_access_token()
+        assert token == "new_access"
+        assert json.loads(token_file.read_text())["refresh_token"] == "new_refresh"
+
+
+class TestSecret:
+    def test_reads_from_secret_file(self):
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data="  file_value  \n")):
+            assert ntz._secret("ANY_KEY") == "file_value"
+
+    def test_falls_back_to_env_var(self):
+        with patch("os.path.exists", return_value=False), \
+             patch.dict(os.environ, {"ANY_KEY": "env_value"}):
+            assert ntz._secret("ANY_KEY") == "env_value"
+
+    def test_uses_default_when_no_file_and_no_env(self):
+        env = {k: v for k, v in os.environ.items() if k != "MISSING_KEY"}
+        with patch("os.path.exists", return_value=False), \
+             patch.dict(os.environ, env, clear=True):
+            assert ntz._secret("MISSING_KEY", "fallback") == "fallback"
+
+    def test_raises_when_no_file_no_env_no_default(self):
+        env = {k: v for k, v in os.environ.items() if k != "MISSING_KEY"}
+        with patch("os.path.exists", return_value=False), \
+             patch.dict(os.environ, env, clear=True):
+            with pytest.raises(KeyError):
+                ntz._secret("MISSING_KEY")
+
+    def test_secret_file_takes_precedence_over_env(self):
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data="file_wins")), \
+             patch.dict(os.environ, {"ANY_KEY": "env_loses"}):
+            assert ntz._secret("ANY_KEY") == "file_wins"
+
 
 class TestAskLlm:
     def test_returns_stripped_response(self):
