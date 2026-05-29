@@ -302,13 +302,17 @@ class TestParseHomecoachMeasurements:
         assert v == {}
 
 
+def _sensor(name, value):
+    return {"parameter": {"name": name}, "latest": {"value": value}}
+
+
 # ── fetch_openaq ──────────────────────────────────────────────────────────────
 
 class TestFetchOpenaq:
     def test_returns_pm25_pm10_and_aqi(self):
         resp = _mock_response({"results": [
-            {"parameter": {"name": "pm25"}, "value": 12.0},
-            {"parameter": {"name": "pm10"}, "value": 25.0},
+            _sensor("PM2.5", 12.0),
+            _sensor("PM10",  25.0),
         ]})
         with patch("requests.get", return_value=resp):
             result = ntz.fetch_openaq()
@@ -331,8 +335,8 @@ class TestFetchOpenaq:
 
     def test_none_values_are_skipped(self):
         resp = _mock_response({"results": [
-            {"parameter": {"name": "pm25"}, "value": None},
-            {"parameter": {"name": "pm10"}, "value": 30.0},
+            _sensor("PM2.5", None),
+            _sensor("PM10",  30.0),
         ]})
         with patch("requests.get", return_value=resp):
             result = ntz.fetch_openaq()
@@ -348,16 +352,14 @@ class TestFetchOpenaq:
             assert ntz.fetch_openaq() == {}
 
     def test_very_high_pm_gives_score_5(self):
-        resp = _mock_response({"results": [
-            {"parameter": {"name": "pm25"}, "value": 60.0},
-        ]})
+        resp = _mock_response({"results": [_sensor("PM2.5", 60.0)]})
         with patch("requests.get", return_value=resp):
             assert ntz.fetch_openaq()["openaq_aqi"] == "Nezdravá"
 
     def test_returns_no2_and_o3(self):
         resp = _mock_response({"results": [
-            {"parameter": {"name": "no2"}, "value": 50.0},
-            {"parameter": {"name": "o3"},  "value": 80.0},
+            _sensor("NO2", 50.0),
+            _sensor("O3",  80.0),
         ]})
         with patch("requests.get", return_value=resp):
             result = ntz.fetch_openaq()
@@ -367,8 +369,8 @@ class TestFetchOpenaq:
 
     def test_no2_dominates_aqi(self):
         resp = _mock_response({"results": [
-            {"parameter": {"name": "pm25"}, "value": 5.0},
-            {"parameter": {"name": "no2"},  "value": 250.0},
+            _sensor("PM2.5", 5.0),
+            _sensor("NO2",   250.0),
         ]})
         with patch("requests.get", return_value=resp):
             assert ntz.fetch_openaq()["openaq_aqi"] == "Nezdravá"

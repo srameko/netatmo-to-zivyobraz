@@ -167,11 +167,11 @@ def _eaqi_label(score: int) -> str:
 
 
 def fetch_openaq() -> dict:
-    """Fetch latest PM2.5 / PM10 from OPENAQ_LOCATION_ID via OpenAQ v3. Returns {} on failure."""
+    """Fetch latest pollutant values from OPENAQ_LOCATION_ID via OpenAQ v3 /sensors. Returns {} on failure."""
     try:
         headers = {"Accept": "application/json", "X-API-Key": OPENAQ_API_KEY}
         r = requests.get(
-            f"https://api.openaq.org/v3/locations/{OPENAQ_LOCATION_ID}/latest",
+            f"https://api.openaq.org/v3/locations/{OPENAQ_LOCATION_ID}/sensors",
             headers=headers,
             timeout=10,
         )
@@ -180,8 +180,10 @@ def fetch_openaq() -> dict:
         pm25 = pm10 = no2 = o3 = None
         for sensor in r.json().get("results", []):
             param = sensor.get("parameter", {})
-            name  = param.get("name", "") if isinstance(param, dict) else str(param)
-            value = sensor.get("value")
+            raw   = param.get("name", "") if isinstance(param, dict) else str(param)
+            name  = raw.lower().replace(".", "").replace(" ", "")
+            latest = sensor.get("latest", {})
+            value  = latest.get("value") if isinstance(latest, dict) else latest
             if value is None:
                 continue
             if name == "pm25":   pm25 = round(float(value), 1)
