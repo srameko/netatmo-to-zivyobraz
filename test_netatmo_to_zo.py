@@ -59,6 +59,29 @@ class TestEaqi:
         assert ntz._eaqi(5.0, 150.0) == 5   # pm25=1, pm10=5
         assert ntz._eaqi(60.0, 10.0) == 5   # pm25=5, pm10=1
 
+    @pytest.mark.parametrize("no2,expected", [
+        (0.0, 1), (40.0, 1),
+        (40.1, 2), (90.0, 2),
+        (90.1, 3), (120.0, 3),
+        (120.1, 4), (230.0, 4),
+        (230.1, 5),
+    ])
+    def test_no2_only(self, no2, expected):
+        assert ntz._eaqi(None, None, no2=no2) == expected
+
+    @pytest.mark.parametrize("o3,expected", [
+        (0.0, 1), (50.0, 1),
+        (50.1, 2), (100.0, 2),
+        (100.1, 3), (130.0, 3),
+        (130.1, 4), (240.0, 4),
+        (240.1, 5),
+    ])
+    def test_o3_only(self, o3, expected):
+        assert ntz._eaqi(None, None, o3=o3) == expected
+
+    def test_no2_and_o3_included_in_worst_of(self):
+        assert ntz._eaqi(5.0, 10.0, no2=250.0) == 5   # no2 dominates
+
     def test_both_none_returns_zero(self):
         assert ntz._eaqi(None, None) == 0
 
@@ -283,46 +306,41 @@ class TestParseHomecoachMeasurements:
 
 class TestFetchOpenaq:
     def test_returns_pm25_pm10_and_aqi(self):
-        loc_resp = _mock_response({"results": [{"id": 42, "name": "Brno-Svatoplukova"}]})
-        latest_resp = _mock_response({"results": [
+        resp = _mock_response({"results": [
             {"parameter": {"name": "pm25"}, "value": 12.0},
             {"parameter": {"name": "pm10"}, "value": 25.0},
         ]})
-        with patch("requests.get", side_effect=[loc_resp, latest_resp]):
+        with patch("requests.get", return_value=resp):
             result = ntz.fetch_openaq()
         assert result["openaq_pm25"] == 12.0
         assert result["openaq_pm10"] == 25.0
         assert result["openaq_aqi"] == "Dobrá"   # pm25→2, pm10→2 → max=2
 
-    def test_api_key_header_sent_on_all_requests(self):
-        loc_resp = _mock_response({"results": [{"id": 1, "name": "X"}]})
-        latest_resp = _mock_response({"results": []})
-        with patch("requests.get", side_effect=[loc_resp, latest_resp]) as mock_get:
-            ntz.fetch_openaq()
-        for call in mock_get.call_args_list:
-            headers = call[1]["headers"]
-            assert headers["X-API-Key"] == ntz.OPENAQ_API_KEY
-
-    def test_station_not_found_returns_empty(self):
+    def test_uses_configured_location_id(self):
         resp = _mock_response({"results": []})
-        with patch("requests.get", return_value=resp):
-            assert ntz.fetch_openaq() == {}
+        with patch("requests.get", return_value=resp) as mock_get, \
+             patch.object(ntz, "OPENAQ_LOCATION_ID", 9999):
+            ntz.fetch_openaq()
+        assert "9999" in mock_get.call_args[0][0]
+
+    def test_api_key_header_sent(self):
+        resp = _mock_response({"results": []})
+        with patch("requests.get", return_value=resp) as mock_get:
+            ntz.fetch_openaq()
+        assert mock_get.call_args[1]["headers"]["X-API-Key"] == ntz.OPENAQ_API_KEY
 
     def test_none_values_are_skipped(self):
-        loc_resp = _mock_response({"results": [{"id": 1, "name": "X"}]})
-        latest_resp = _mock_response({"results": [
+        resp = _mock_response({"results": [
             {"parameter": {"name": "pm25"}, "value": None},
             {"parameter": {"name": "pm10"}, "value": 30.0},
         ]})
-        with patch("requests.get", side_effect=[loc_resp, latest_resp]):
+        with patch("requests.get", return_value=resp):
             result = ntz.fetch_openaq()
         assert "openaq_pm25" not in result
         assert result["openaq_pm10"] == 30.0
 
     def test_no_sensors_returns_empty(self):
-        loc_resp = _mock_response({"results": [{"id": 1, "name": "X"}]})
-        latest_resp = _mock_response({"results": []})
-        with patch("requests.get", side_effect=[loc_resp, latest_resp]):
+        with patch("requests.get", return_value=_mock_response({"results": []})):
             assert ntz.fetch_openaq() == {}
 
     def test_network_error_returns_empty(self):
@@ -330,13 +348,30 @@ class TestFetchOpenaq:
             assert ntz.fetch_openaq() == {}
 
     def test_very_high_pm_gives_score_5(self):
-        loc_resp = _mock_response({"results": [{"id": 1, "name": "X"}]})
-        latest_resp = _mock_response({"results": [
+        resp = _mock_response({"results": [
             {"parameter": {"name": "pm25"}, "value": 60.0},
         ]})
-        with patch("requests.get", side_effect=[loc_resp, latest_resp]):
+        with patch("requests.get", return_value=resp):
+            assert ntz.fetch_openaq()["openaq_aqi"] == "Nezdravá"
+
+    def test_returns_no2_and_o3(self):
+        resp = _mock_response({"results": [
+            {"parameter": {"name": "no2"}, "value": 50.0},
+            {"parameter": {"name": "o3"},  "value": 80.0},
+        ]})
+        with patch("requests.get", return_value=resp):
             result = ntz.fetch_openaq()
-        assert result["openaq_aqi"] == "Nezdravá"
+        assert result["openaq_no2"] == 50.0
+        assert result["openaq_o3"] == 80.0
+        assert result["openaq_aqi"] == "Dobrá"   # no2→2, o3→2 → max=2
+
+    def test_no2_dominates_aqi(self):
+        resp = _mock_response({"results": [
+            {"parameter": {"name": "pm25"}, "value": 5.0},
+            {"parameter": {"name": "no2"},  "value": 250.0},
+        ]})
+        with patch("requests.get", return_value=resp):
+            assert ntz.fetch_openaq()["openaq_aqi"] == "Nezdravá"
 
 
 # ── fetch_wind_speed ──────────────────────────────────────────────────────────

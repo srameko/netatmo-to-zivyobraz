@@ -33,8 +33,8 @@ ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
 OPENAQ_API_KEY        = _secret("OPENAQ_API_KEY")
 
 LOCATION_LAT    = float(os.environ.get("LOCATION_LAT", "0"))
-LOCATION_LON    = float(os.environ.get("LOCATION_LON", "0"))
-OPENAQ_STATION  = os.environ.get("OPENAQ_STATION", "Brno-Svatoplukova")
+LOCATION_LON        = float(os.environ.get("LOCATION_LON", "0"))
+OPENAQ_LOCATION_ID  = int(os.environ.get("OPENAQ_LOCATION_ID", "4425"))
 
 # MAC -> room name mapping, e.g. "70:ee:50:83:3e:ce=Pracovna,70:ee:50:83:2e:3e=Obyvak"
 HOMECOACH_MAP = {
@@ -131,7 +131,8 @@ def fetch_wind_speed() -> float:
         return 0.0
 
 
-def _eaqi(pm25: float | None, pm10: float | None) -> int:
+def _eaqi(pm25: float | None, pm10: float | None,
+          no2: float | None = None, o3: float | None = None) -> int:
     """European Air Quality Index, 1 (best) – 5 (worst)."""
     scores = []
     if pm25 is not None:
@@ -146,6 +147,18 @@ def _eaqi(pm25: float | None, pm10: float | None) -> int:
         elif pm10 <= 50:  scores.append(3)
         elif pm10 <= 100: scores.append(4)
         else:             scores.append(5)
+    if no2 is not None:
+        if no2 <= 40:     scores.append(1)
+        elif no2 <= 90:   scores.append(2)
+        elif no2 <= 120:  scores.append(3)
+        elif no2 <= 230:  scores.append(4)
+        else:             scores.append(5)
+    if o3 is not None:
+        if o3 <= 50:      scores.append(1)
+        elif o3 <= 100:   scores.append(2)
+        elif o3 <= 130:   scores.append(3)
+        elif o3 <= 240:   scores.append(4)
+        else:             scores.append(5)
     return max(scores) if scores else 0
 
 
@@ -154,53 +167,39 @@ def _eaqi_label(score: int) -> str:
 
 
 def fetch_openaq() -> dict:
-    """Fetch latest PM2.5 / PM10 from OPENAQ_STATION (ČHMÚ) via OpenAQ v3. Returns {} on failure."""
+    """Fetch latest PM2.5 / PM10 from OPENAQ_LOCATION_ID via OpenAQ v3. Returns {} on failure."""
     try:
         headers = {"Accept": "application/json", "X-API-Key": OPENAQ_API_KEY}
         r = requests.get(
-            "https://api.openaq.org/v3/locations",
-            params={"name": OPENAQ_STATION, "limit": 5},
-            headers=headers,
-            timeout=10,
-        )
-        r.raise_for_status()
-        locations = r.json().get("results", [])
-        if not locations:
-            log.warning("OpenAQ: station %r not found", OPENAQ_STATION)
-            return {}
-
-        location_id = locations[0]["id"]
-        log.info("OpenAQ: location id=%s name=%s", location_id, locations[0].get("name"))
-
-        r = requests.get(
-            f"https://api.openaq.org/v3/locations/{location_id}/latest",
+            f"https://api.openaq.org/v3/locations/{OPENAQ_LOCATION_ID}/latest",
             headers=headers,
             timeout=10,
         )
         r.raise_for_status()
 
-        pm25 = pm10 = None
+        pm25 = pm10 = no2 = o3 = None
         for sensor in r.json().get("results", []):
             param = sensor.get("parameter", {})
             name  = param.get("name", "") if isinstance(param, dict) else str(param)
             value = sensor.get("value")
             if value is None:
                 continue
-            if name == "pm25":
-                pm25 = round(float(value), 1)
-            elif name == "pm10":
-                pm10 = round(float(value), 1)
+            if name == "pm25":   pm25 = round(float(value), 1)
+            elif name == "pm10": pm10 = round(float(value), 1)
+            elif name == "no2":  no2  = round(float(value), 1)
+            elif name == "o3":   o3   = round(float(value), 1)
 
         out = {}
-        if pm25 is not None:
-            out["openaq_pm25"] = pm25
-        if pm10 is not None:
-            out["openaq_pm10"] = pm10
-        score = _eaqi(pm25, pm10)
+        if pm25 is not None: out["openaq_pm25"] = pm25
+        if pm10 is not None: out["openaq_pm10"] = pm10
+        if no2  is not None: out["openaq_no2"]  = no2
+        if o3   is not None: out["openaq_o3"]   = o3
+        score = _eaqi(pm25, pm10, no2, o3)
         if score:
             out["openaq_aqi"] = _eaqi_label(score)
 
-        log.info("OpenAQ: pm25=%s pm10=%s aqi=%s", pm25, pm10, out.get("openaq_aqi"))
+        log.info("OpenAQ: location_id=%s pm25=%s pm10=%s no2=%s o3=%s aqi=%s",
+                 OPENAQ_LOCATION_ID, pm25, pm10, no2, o3, out.get("openaq_aqi"))
         return out
     except Exception as e:
         log.warning("OpenAQ fetch failed: %s", e)

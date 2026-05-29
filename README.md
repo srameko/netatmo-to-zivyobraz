@@ -47,6 +47,9 @@ Netatmo's built-in AQI is NOT used — it is a model from The Weather Company, n
 |---------------|----------------------|
 | `openaq_pm25` | PM2.5 (µg/m³)        |
 | `openaq_pm10` | PM10 (µg/m³)         |
+| `openaq_no2`  | NO₂ (µg/m³)          |
+| `openaq_o3`   | O₃ (µg/m³)           |
+| `openaq_aqi`  | EAQI label (Czech)   |
 
 ### Feels-like calculation
 
