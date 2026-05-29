@@ -30,10 +30,11 @@ NETATMO_CLIENT_SECRET = _secret("NETATMO_CLIENT_SECRET")
 NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
 ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
 
-OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
-LOCATION_LAT = float(os.environ.get("LOCATION_LAT", "0"))
-LOCATION_LON = float(os.environ.get("LOCATION_LON", "0"))
+OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
+LOCATION_LAT    = float(os.environ.get("LOCATION_LAT", "0"))
+LOCATION_LON    = float(os.environ.get("LOCATION_LON", "0"))
+OPENAQ_STATION  = os.environ.get("OPENAQ_STATION", "Brno-Svatoplukova")
 
 # MAC -> room name mapping, e.g. "70:ee:50:83:3e:ce=Pracovna,70:ee:50:83:2e:3e=Obyvak"
 HOMECOACH_MAP = {
@@ -128,6 +129,81 @@ def fetch_wind_speed() -> float:
     except Exception as e:
         log.warning("Failed to fetch wind speed: %s", e)
         return 0.0
+
+
+def _eaqi(pm25: float | None, pm10: float | None) -> int:
+    """European Air Quality Index, 1 (best) – 5 (worst)."""
+    scores = []
+    if pm25 is not None:
+        if pm25 <= 10:    scores.append(1)
+        elif pm25 <= 20:  scores.append(2)
+        elif pm25 <= 25:  scores.append(3)
+        elif pm25 <= 50:  scores.append(4)
+        else:             scores.append(5)
+    if pm10 is not None:
+        if pm10 <= 20:    scores.append(1)
+        elif pm10 <= 40:  scores.append(2)
+        elif pm10 <= 50:  scores.append(3)
+        elif pm10 <= 100: scores.append(4)
+        else:             scores.append(5)
+    return max(scores) if scores else 0
+
+
+def _eaqi_label(score: int) -> str:
+    return {1: "Velmi dobrá", 2: "Dobrá", 3: "Přijatelná", 4: "Špatná", 5: "Nezdravá"}.get(score, str(score))
+
+
+def fetch_openaq() -> dict:
+    """Fetch latest PM2.5 / PM10 from OPENAQ_STATION (ČHMÚ) via OpenAQ v3. Returns {} on failure."""
+    try:
+        r = requests.get(
+            "https://api.openaq.org/v3/locations",
+            params={"name": OPENAQ_STATION, "limit": 5},
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        locations = r.json().get("results", [])
+        if not locations:
+            log.warning("OpenAQ: station %r not found", OPENAQ_STATION)
+            return {}
+
+        location_id = locations[0]["id"]
+        log.info("OpenAQ: location id=%s name=%s", location_id, locations[0].get("name"))
+
+        r = requests.get(
+            f"https://api.openaq.org/v3/locations/{location_id}/latest",
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        r.raise_for_status()
+
+        pm25 = pm10 = None
+        for sensor in r.json().get("results", []):
+            param = sensor.get("parameter", {})
+            name  = param.get("name", "") if isinstance(param, dict) else str(param)
+            value = sensor.get("value")
+            if value is None:
+                continue
+            if name == "pm25":
+                pm25 = round(float(value), 1)
+            elif name == "pm10":
+                pm10 = round(float(value), 1)
+
+        out = {}
+        if pm25 is not None:
+            out["openaq_pm25"] = pm25
+        if pm10 is not None:
+            out["openaq_pm10"] = pm10
+        score = _eaqi(pm25, pm10)
+        if score:
+            out["openaq_aqi"] = _eaqi_label(score)
+
+        log.info("OpenAQ: pm25=%s pm10=%s aqi=%s", pm25, pm10, out.get("openaq_aqi"))
+        return out
+    except Exception as e:
+        log.warning("OpenAQ fetch failed: %s", e)
+        return {}
 
 
 def _slugify(name: str) -> str:
@@ -362,6 +438,9 @@ def main():
         values.update(coach_values)
 
         log.info("Measurements: %s", values)
+
+        # Air quality from OpenAQ / ČHMÚ
+        values.update(fetch_openaq())
 
         # Use Netatmo wind if available, otherwise fall back to Open-Meteo
         wind_kmh = float(values.get("netatmo_wind_speed", 0) or fetch_wind_speed())
