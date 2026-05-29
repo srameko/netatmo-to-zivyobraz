@@ -37,7 +37,6 @@ Keys are derived from the device name configured in `HOMECOACH_MAP` (e.g. `Praco
 | `netatmo_{slug}_co2`      | CO₂ (ppm)                     |
 | `netatmo_{slug}_noise`    | Noise (dB)                    |
 | `netatmo_{slug}_health`   | Air quality label (Czech)     |
-| `llm_vetrani_{slug}`      | Ventilation advice (Czech, LLM) |
 
 ### Air Quality — ČHMÚ via OpenAQ
 
@@ -61,13 +60,13 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 
 ### Air quality labels
 
-| Score | Normal outdoor (−10–35 °C)   | Extreme outdoor                |
-|-------|------------------------------|--------------------------------|
-| 0     | `Zdravý`                     | `Zdravý`                       |
-| 1     | `Dobrý`                      | `Dobrý`                        |
-| 2     | `Přijatelný – větrejte`      | `Přijatelný – větrejte krátce` |
-| 3     | `Špatný – větrejte`          | `Špatný – větrejte krátce`     |
-| 4     | `Nezdravý – větrejte ihned`  | `Nezdravý – větrejte krátce`   |
+| Score | Label        |
+|-------|--------------|
+| 0     | `Zdravý`     |
+| 1     | `Dobrý`      |
+| 2     | `Přijatelný` |
+| 3     | `Špatný`     |
+| 4     | `Nezdravý`   |
 
 ## Environment variables
 
@@ -78,8 +77,6 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 | `NETATMO_REFRESH_TOKEN` | ✓        | Refresh token (auto-renewed on each run)               |
 | `ZO_IMPORT_KEY`         | ✓        | From zivyobraz.eu → Values → Import key                |
 | `OPENAQ_API_KEY`        | ✓        | From openaq.org → API keys                             |
-| `OLLAMA_URL`            |          | Ollama base URL (default: `http://rpi.home:11434`)     |
-| `OLLAMA_MODEL`          |          | Model name (default: `gemma4:e2b`)                     |
 | `LOCATION_LAT`          |          | Latitude for Open-Meteo wind fallback                  |
 | `LOCATION_LON`          |          | Longitude for Open-Meteo wind fallback                 |
 | `HOMECOACH_MAP`         |          | MAC→slug mapping: `AA:BB:CC:DD:EE:FF=pracovna,...`    |

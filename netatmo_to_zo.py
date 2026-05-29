@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 Netatmo -> Zivy obraz
-Fetches data from the Netatmo API, asks an LLM for clothing and ventilation
-advice, and pushes everything to Zivy obraz as custom values.
-Intended to run every 15 minutes (Docker CMD loop).
+Fetches data from the Netatmo API and OpenAQ, then pushes everything
+to Zivy obraz as custom values. Intended to run every 15 minutes.
 """
 
 import os
@@ -33,8 +32,6 @@ NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
 ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
 OPENAQ_API_KEY        = _secret("OPENAQ_API_KEY")
 
-OLLAMA_URL      = _secret("OLLAMA_URL", "http://rpi.home:11434")
-OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
 LOCATION_LAT    = float(os.environ.get("LOCATION_LAT", "0"))
 LOCATION_LON    = float(os.environ.get("LOCATION_LON", "0"))
 OPENAQ_STATION  = os.environ.get("OPENAQ_STATION", "Brno-Svatoplukova")
@@ -264,22 +261,9 @@ def _health_score(co2: int, humidity: int) -> int:
     return max(co2_score, hum_score)
 
 
-def health_label(score: int, outdoor_temp: float) -> str:
-    """Czech air quality label with ventilation advice based on outdoor temperature."""
-    labels = {0: "Zdravý", 1: "Dobrý", 2: "Přijatelný", 3: "Špatný", 4: "Nezdravý"}
-    label = labels.get(score, str(score))
-
-    if score <= 1:
-        return label
-
-    if outdoor_temp < -10 or outdoor_temp > 35:
-        vent = "větrejte krátce"
-    elif score >= 4:
-        vent = "větrejte ihned"
-    else:
-        vent = "větrejte"
-
-    return f"{label} – {vent}"
+def health_label(score: int) -> str:
+    """Czech one-word air quality label for the given 0–4 score."""
+    return {0: "Zdravý", 1: "Dobrý", 2: "Přijatelný", 3: "Špatný", 4: "Nezdravý"}.get(score, str(score))
 
 
 def parse_measurements(data: dict) -> dict:
@@ -328,75 +312,29 @@ def parse_measurements(data: dict) -> dict:
 
 
 def parse_homecoach_measurements(data: dict) -> dict:
-    """
-    Returns measurements keyed by room name (from HOMECOACH_MAP) or MAC suffix.
-    Also returns a list of per-device dicts for LLM ventilation queries.
-    """
+    """Returns measurements keyed by room slug (from HOMECOACH_MAP or MAC suffix)."""
     values = {}
-    coaches = []
 
     for device in data.get("body", {}).get("devices", []):
         dash = device.get("dashboard_data", {})
         mac  = device.get("_id", "00:00:00:00:00:00")
 
-        # Resolve room name from map, fall back to last 4 MAC chars
         room_raw = HOMECOACH_MAP.get(mac, mac.replace(":", "_")[-4:])
         slug     = _slugify(room_raw)
         log.info("Coach device: id=%s room=%s slug=%s", mac, room_raw, slug)
 
-        entry = {"slug": slug, "room": room_raw}
-
         if "Temperature" in dash:
             values[f"netatmo_{slug}_temp"]     = round(dash["Temperature"], 1)
-            entry["temp"] = round(dash["Temperature"], 1)
         if "Humidity" in dash:
             values[f"netatmo_{slug}_humidity"] = dash["Humidity"]
-            entry["humidity"] = dash["Humidity"]
         if "CO2" in dash:
             values[f"netatmo_{slug}_co2"]      = dash["CO2"]
-            entry["co2"] = dash["CO2"]
         if "Noise" in dash:
             values[f"netatmo_{slug}_noise"]    = dash["Noise"]
         if "health_idx" in dash:
-            entry["health_idx"] = dash["health_idx"]
+            values[f"netatmo_{slug}_health"]   = health_label(dash["health_idx"])
 
-        coaches.append(entry)
-
-    return values, coaches
-
-
-def ask_llm(prompt: str) -> str:
-    log.info("Asking LLM (%s)...", OLLAMA_MODEL)
-    r = requests.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={
-            "model":      OLLAMA_MODEL,
-            "prompt":     prompt,
-            "stream":     False,
-            "think":      False,
-            "keep_alive": -1,
-            "options":    {"temperature": 0.3},
-        },
-        timeout=120,
-    )
-    r.raise_for_status()
-    response = r.json()["response"].strip()
-    log.info("LLM response: %s", response)
-    return response
-
-
-def ask_llm_ventilation(coach: dict, outdoor_temp: float) -> str:
-    """Ask LLM whether to ventilate for a specific room/coach."""
-    co2      = coach.get("co2", "?")
-    humidity = coach.get("humidity", "?")
-    room     = coach.get("room", "room")
-
-    prompt = (
-        f"{room} - interiér: CO2 {co2} ppm, vlhkost {humidity} %. "
-        f"Exteriér: {outdoor_temp} °C. "
-        "Mám větrat? Jedna věta, stručně, prakticky, česky."
-    )
-    return ask_llm(prompt)
+    return values
 
 
 def push_to_zo(values: dict):
@@ -419,9 +357,7 @@ def main():
 
         values = {}
         values.update(parse_measurements(station_data))
-
-        coach_values, coaches = parse_homecoach_measurements(coach_data)
-        values.update(coach_values)
+        values.update(parse_homecoach_measurements(coach_data))
 
         log.info("Measurements: %s", values)
 
@@ -436,23 +372,11 @@ def main():
         if isinstance(outdoor_temp, (int, float)) and isinstance(outdoor_humidity, (int, float)):
             values["netatmo_outdoor_feels_like"] = feels_like(outdoor_temp, outdoor_humidity, wind_kmh)
 
-        outdoor_temp = values.get("netatmo_outdoor_temp", 20.0)
-
         # Indoor module health index (computed from CO2 + humidity)
         co2 = values.get("netatmo_indoor_co2")
         hum = values.get("netatmo_indoor_humidity")
         if isinstance(co2, int) and isinstance(hum, int):
-            values["netatmo_indoor_health"] = health_label(_health_score(co2, hum), outdoor_temp)
-
-        # Home Coach health index (provided by Netatmo API)
-        for coach in coaches:
-            slug = coach["slug"]
-            if "health_idx" in coach:
-                values[f"netatmo_{slug}_health"] = health_label(coach["health_idx"], outdoor_temp)
-
-        for coach in coaches:
-            slug = coach["slug"]
-            values[f"llm_vetrani_{slug}"] = ask_llm_ventilation(coach, outdoor_temp)
+            values["netatmo_indoor_health"] = health_label(_health_score(co2, hum))
 
         push_to_zo(values)
     except requests.HTTPError as e:

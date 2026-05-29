@@ -1,17 +1,17 @@
 # Živý obraz — Weather Display Service
 
-Single Docker container running on Raspberry Pi 5. Fetches environmental data every 30 minutes via cron and pushes it to the Živý obraz e-ink display API.
+Single Docker container running on Raspberry Pi 5. Fetches environmental data every 15 minutes via cron and pushes it to the Živý obraz e-ink display API.
 
 ## Architecture
 
 ```
-Netatmo API   → indoor/outdoor sensor data + ventilation advice → Živý obraz
-OpenAQ API    → AQI from ČHMÚ station Brno-Svatoplukova        → Živý obraz
+Netatmo API   → indoor/outdoor sensor data → Živý obraz
+OpenAQ API    → AQI from ČHMÚ station Brno-Svatoplukova → Živý obraz
 ```
 
 **Weather forecast text (Alojz style)** is handled natively by the Živý obraz platform via the YrNoProvider integration (`lovecka.info`). This is NOT part of this container — configure it directly in the Živý obraz editor as a native widget.
 
-**Clothing recommendation (`llm_obleceni`)** is NOT wanted. Do not implement or keep LLM calls for outdoor clothing advice.
+**LLM is NOT used.** Do not implement any LLM/Ollama calls (no clothing advice, no ventilation advice, no summaries).
 
 ## Data Sources
 
@@ -26,21 +26,11 @@ OpenAQ API    → AQI from ČHMÚ station Brno-Svatoplukova        → Živý ob
 - Fields from **Home Coach** devices: `Temperature`, `Humidity`, `CO2`, `Noise`, `health_idx`
 - Note: Netatmo outdoor AQI is NOT used — it comes from The Weather Company model, not the sensor
 
-### Ventilation Advice — LLM (Ollama / gemma4:e2b)
-- Used ONLY for per-room ventilation advice (`llm_vetrani_{slug}`) based on CO2 and outdoor temperature
-- Ollama runs as systemd service on RPi OS (not in Docker)
-- URL: `http://rpi.home:11434` (use host network or this hostname from within the container)
-- Model: `gemma4:e2b`
-- Use `/api/generate` endpoint — thinking is OFF by default for this model on that endpoint
-- Output must be in **Czech**, short (max 1 sentence), practical
-- Do NOT use LLM for anything else (no clothing advice, no weather summary)
-
 ### Air Quality — OpenAQ / ČHMÚ
 - Station: **Brno-Svatoplukova** (ČHMÚ)
 - OpenAQ API v3: `https://api.openaq.org/v3/`
 - Fetch latest PM2.5, PM10 values for this station
 - Push as `openaq_pm25` and `openaq_pm10` to Živý obraz
-- No API key required for basic usage
 - If unavailable: skip push silently, do not push empty/null values
 
 ### Feels-like Temperature
@@ -50,15 +40,15 @@ OpenAQ API    → AQI from ČHMÚ station Brno-Svatoplukova        → Živý ob
 - Wind source: Netatmo wind module if present, fallback to Open-Meteo (`LOCATION_LAT`, `LOCATION_LON`)
 
 ### Air Quality Labels (indoor)
-Czech label derived from CO2/humidity (indoor module) or `health_idx` (Home Coach):
+Czech one-word label derived from CO2/humidity (indoor module) or `health_idx` (Home Coach):
 
-| Score | Normal outdoor (−10–35 °C)   | Extreme outdoor                |
-|-------|------------------------------|--------------------------------|
-| 0     | `Zdravý`                     | `Zdravý`                       |
-| 1     | `Dobrý`                      | `Dobrý`                        |
-| 2     | `Přijatelný – větrejte`      | `Přijatelný – větrejte krátce` |
-| 3     | `Špatný – větrejte`          | `Špatný – větrejte krátce`     |
-| 4     | `Nezdravý – větrejte ihned`  | `Nezdravý – větrejte krátce`   |
+| Score | Label        |
+|-------|--------------|
+| 0     | `Zdravý`     |
+| 1     | `Dobrý`      |
+| 2     | `Přijatelný` |
+| 3     | `Špatný`     |
+| 4     | `Nezdravý`   |
 
 ## Environment Variables
 
@@ -68,18 +58,16 @@ NETATMO_CLIENT_SECRET     # Netatmo developer app
 NETATMO_REFRESH_TOKEN     # OAuth2 refresh token (auto-renewed)
 ZO_IMPORT_KEY             # Živý obraz import key
 OPENAQ_API_KEY            # OpenAQ v3 API key (openaq.org)
-OLLAMA_URL                # default: http://rpi.home:11434
-OLLAMA_MODEL              # default: gemma4:e2b
 LOCATION_LAT              # for Open-Meteo wind fallback
 LOCATION_LON              # for Open-Meteo wind fallback
 HOMECOACH_MAP             # MAC→slug mapping, e.g. AA:BB:CC:DD:EE:FF=pracovna,...
 ```
 
-Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`) are managed in Portainer as Docker Swarm secrets under `/run/secrets/<name>`. Never committed to the repository.
+Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portainer as Docker Swarm secrets under `/run/secrets/<name>`. Never committed to the repository.
 
 ## Container
 
-- Single Python container, `python:3.12-slim`, cron every 15 minutes
+- Single Python container, Alpine, cron every 15 minutes
 - Multi-stage Alpine Dockerfile: builder installs deps, final image copies — no pip in production
 - Built for `linux/arm64` (RPi 5)
 - Image: `ghcr.io/srameko/netatmo-to-zivyobraz`
@@ -98,7 +86,6 @@ Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`) are managed in Portainer as Docker Swarm 
 - Netatmo token expired: refresh using refresh token, retry once, persist new token
 - Netatmo unavailable: skip entire run, log error
 - OpenAQ unavailable: skip AQI values, continue with rest
-- Ollama unavailable: skip `llm_vetrani_*` values, continue with rest
 - Never push empty/null values to Živý obraz
 
 ## Notes

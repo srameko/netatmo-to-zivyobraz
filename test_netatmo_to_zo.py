@@ -142,33 +142,14 @@ class TestHealthScore:
 # ── health_label ──────────────────────────────────────────────────────────────
 
 class TestHealthLabel:
-    def test_score_0_and_1_have_no_ventilation_advice(self):
-        assert ntz.health_label(0, 20.0) == "Zdravý"
-        assert ntz.health_label(1, 20.0) == "Dobrý"
+    @pytest.mark.parametrize("score,label", [
+        (0, "Zdravý"), (1, "Dobrý"), (2, "Přijatelný"), (3, "Špatný"), (4, "Nezdravý"),
+    ])
+    def test_known_scores(self, score, label):
+        assert ntz.health_label(score) == label
 
-    def test_normal_ventilation_advice(self):
-        assert ntz.health_label(2, 20.0) == "Přijatelný – větrejte"
-        assert ntz.health_label(3, 20.0) == "Špatný – větrejte"
-
-    def test_score_4_urgent_ventilation(self):
-        assert ntz.health_label(4, 20.0) == "Nezdravý – větrejte ihned"
-
-    def test_extreme_cold_gives_short_ventilation(self):
-        assert ntz.health_label(3, -11.0) == "Špatný – větrejte krátce"
-
-    def test_extreme_heat_gives_short_ventilation(self):
-        assert ntz.health_label(2, 36.0) == "Přijatelný – větrejte krátce"
-
-    def test_extreme_cold_overrides_score_4_urgency(self):
-        assert ntz.health_label(4, -15.0) == "Nezdravý – větrejte krátce"
-
-    def test_boundary_minus_10_is_not_extreme(self):
-        # < -10 required; exactly -10 is not extreme
-        assert ntz.health_label(3, -10.0) == "Špatný – větrejte"
-
-    def test_boundary_35_is_not_extreme(self):
-        # > 35 required; exactly 35 is not extreme
-        assert ntz.health_label(2, 35.0) == "Přijatelný – větrejte"
+    def test_unknown_score_returns_stringified(self):
+        assert ntz.health_label(99) == "99"
 
 
 # ── _slugify ──────────────────────────────────────────────────────────────────
@@ -280,24 +261,22 @@ _COACH_PAYLOAD = {
 class TestParseHomecoachMeasurements:
     def test_known_mac_uses_room_name(self):
         with patch.object(ntz, "HOMECOACH_MAP", {"70:ee:50:83:3e:ce": "Pracovna"}):
-            v, coaches = ntz.parse_homecoach_measurements(_COACH_PAYLOAD)
+            v = ntz.parse_homecoach_measurements(_COACH_PAYLOAD)
         assert v["netatmo_pracovna_temp"] == 22.0
         assert v["netatmo_pracovna_humidity"] == 48
         assert v["netatmo_pracovna_co2"] == 900
         assert v["netatmo_pracovna_noise"] == 35
-        assert coaches[0]["slug"] == "pracovna"
-        assert coaches[0]["health_idx"] == 1
+        assert v["netatmo_pracovna_health"] == "Dobrý"  # health_idx=1
 
     def test_unknown_mac_falls_back_to_mac_suffix(self):
         with patch.object(ntz, "HOMECOACH_MAP", {}):
-            v, coaches = ntz.parse_homecoach_measurements(_COACH_PAYLOAD)
+            v = ntz.parse_homecoach_measurements(_COACH_PAYLOAD)
         # "70:ee:50:83:3e:ce".replace(":", "_")[-4:] = "e_ce", slugified = "e_ce"
         assert any("e_ce" in k for k in v)
 
     def test_empty_payload(self):
-        v, coaches = ntz.parse_homecoach_measurements({})
+        v = ntz.parse_homecoach_measurements({})
         assert v == {}
-        assert coaches == []
 
 
 # ── fetch_openaq ──────────────────────────────────────────────────────────────
@@ -432,24 +411,6 @@ class TestTokenManagement:
 
 # ── ask_llm ───────────────────────────────────────────────────────────────────
 
-class TestAskLlmVentilation:
-    def test_prompt_contains_co2_humidity_and_outdoor_temp(self):
-        coach = {"slug": "pracovna", "room": "Pracovna", "co2": 1200, "humidity": 55}
-        with patch.object(ntz, "ask_llm", return_value="Větrejte.") as mock_llm:
-            result = ntz.ask_llm_ventilation(coach, 10.0)
-        assert result == "Větrejte."
-        prompt = mock_llm.call_args[0][0]
-        assert "1200" in prompt
-        assert "55" in prompt
-        assert "10" in prompt
-
-    def test_prompt_requests_czech_output(self):
-        coach = {"slug": "x", "room": "X", "co2": 800, "humidity": 50}
-        with patch.object(ntz, "ask_llm", return_value="OK") as mock_llm:
-            ntz.ask_llm_ventilation(coach, 20.0)
-        assert "česky" in mock_llm.call_args[0][0]
-
-
 class TestGetAccessToken:
     def test_refreshes_persists_and_returns_access_token(self, tmp_path):
         token_file = tmp_path / "tokens.json"
@@ -491,17 +452,3 @@ class TestSecret:
              patch("builtins.open", mock_open(read_data="file_wins")), \
              patch.dict(os.environ, {"ANY_KEY": "env_loses"}):
             assert ntz._secret("ANY_KEY") == "file_wins"
-
-
-class TestAskLlm:
-    def test_returns_stripped_response(self):
-        resp = _mock_response({"response": "  Wear a coat.  "})
-        with patch("requests.post", return_value=resp):
-            assert ntz.ask_llm("some prompt") == "Wear a coat."
-
-    def test_propagates_http_error(self):
-        resp = MagicMock()
-        resp.raise_for_status.side_effect = requests.HTTPError("500")
-        with patch("requests.post", return_value=resp):
-            with pytest.raises(requests.HTTPError):
-                ntz.ask_llm("prompt")
