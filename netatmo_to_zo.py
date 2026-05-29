@@ -31,6 +31,7 @@ NETATMO_CLIENT_ID     = _secret("NETATMO_CLIENT_ID")
 NETATMO_CLIENT_SECRET = _secret("NETATMO_CLIENT_SECRET")
 NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
 ZO_IMPORT_KEY         = _secret("ZO_IMPORT_KEY")
+OPENAQ_API_KEY        = _secret("OPENAQ_API_KEY")
 
 OLLAMA_URL      = _secret("OLLAMA_URL", "http://rpi.home:11434")
 OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
@@ -158,10 +159,11 @@ def _eaqi_label(score: int) -> str:
 def fetch_openaq() -> dict:
     """Fetch latest PM2.5 / PM10 from OPENAQ_STATION (ČHMÚ) via OpenAQ v3. Returns {} on failure."""
     try:
+        headers = {"Accept": "application/json", "X-API-Key": OPENAQ_API_KEY}
         r = requests.get(
             "https://api.openaq.org/v3/locations",
             params={"name": OPENAQ_STATION, "limit": 5},
-            headers={"Accept": "application/json"},
+            headers=headers,
             timeout=10,
         )
         r.raise_for_status()
@@ -175,7 +177,7 @@ def fetch_openaq() -> dict:
 
         r = requests.get(
             f"https://api.openaq.org/v3/locations/{location_id}/latest",
-            headers={"Accept": "application/json"},
+            headers=headers,
             timeout=10,
         )
         r.raise_for_status()

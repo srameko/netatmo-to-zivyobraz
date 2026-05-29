@@ -16,6 +16,7 @@ os.environ.setdefault("NETATMO_CLIENT_ID", "test_id")
 os.environ.setdefault("NETATMO_CLIENT_SECRET", "test_secret")
 os.environ.setdefault("NETATMO_REFRESH_TOKEN", "test_refresh")
 os.environ.setdefault("ZO_IMPORT_KEY", "test_zo_key")
+os.environ.setdefault("OPENAQ_API_KEY", "test_openaq_key")
 
 import netatmo_to_zo as ntz  # noqa: E402
 
@@ -313,6 +314,15 @@ class TestFetchOpenaq:
         assert result["openaq_pm25"] == 12.0
         assert result["openaq_pm10"] == 25.0
         assert result["openaq_aqi"] == "Dobrá"   # pm25→2, pm10→2 → max=2
+
+    def test_api_key_header_sent_on_all_requests(self):
+        loc_resp = _mock_response({"results": [{"id": 1, "name": "X"}]})
+        latest_resp = _mock_response({"results": []})
+        with patch("requests.get", side_effect=[loc_resp, latest_resp]) as mock_get:
+            ntz.fetch_openaq()
+        for call in mock_get.call_args_list:
+            headers = call[1]["headers"]
+            assert headers["X-API-Key"] == ntz.OPENAQ_API_KEY
 
     def test_station_not_found_returns_empty(self):
         resp = _mock_response({"results": []})
