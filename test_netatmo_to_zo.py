@@ -289,7 +289,7 @@ class TestParseHomecoachMeasurements:
         assert v["netatmo_pracovna_humidity"] == 48
         assert v["netatmo_pracovna_co2"] == 900
         assert v["netatmo_pracovna_noise"] == 35
-        assert v["netatmo_pracovna_health"] == "Dobrý"  # health_idx=1
+        assert v["netatmo_pracovna_health"] == "Dobrá"  # health_idx=1
 
     def test_unknown_mac_falls_back_to_mac_suffix(self):
         with patch.object(ntz, "HOMECOACH_MAP", {}):
