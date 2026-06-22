@@ -1,11 +1,11 @@
 # ---- builder: install deps into an isolated directory ----
-FROM python:3.14.5-alpine AS builder
+FROM python:3.14.6-alpine AS builder
 
 WORKDIR /install
 RUN pip install --no-cache-dir --target=/install requests==2.33.*
 
 # ---- final: clean Alpine Python, no pip, no cache ----
-FROM python:3.14.5-alpine
+FROM python:3.14.6-alpine
 
 RUN apk upgrade --no-cache
 
