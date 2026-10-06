@@ -6,7 +6,7 @@ Single Docker container running on Raspberry Pi 5. Fetches environmental data ev
 
 ```
 Netatmo API   → indoor/outdoor sensor data → Živý obraz
-OpenAQ API    → AQI from ČHMÚ station Brno-Svatoplukova → Živý obraz
+OpenAQ API    → AQI from ČHMÚ station Brno - Dětská nemocnice → Živý obraz
 ```
 
 **Weather forecast text (Alojz style)** is handled natively by the Živý obraz platform via the YrNoProvider integration (`lovecka.info`). This is NOT part of this container — configure it directly in the Živý obraz editor as a native widget.
@@ -31,7 +31,6 @@ OpenAQ API    → AQI from ČHMÚ station Brno-Svatoplukova → Živý obraz
 - OpenAQ API v3: `https://api.openaq.org/v3/`, endpoint `/v3/locations/{id}/sensors`
 - Fetch latest PM2.5, PM10, NO2, O3 values for this station
 - Push as `openaq_pm25`, `openaq_pm10`, `openaq_no2`, `openaq_o3` and `openaq_aqi` (EAQI label) to Živý obraz
-- If unavailable: skip push silently, do not push empty/null values
 
 ### Feels-like Temperature
 - Wind chill (WMO formula) when temp ≤ 14 °C and wind > 4.8 km/h
@@ -86,10 +85,8 @@ Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portaine
 - Netatmo token expired: refresh using refresh token, retry once, persist new token
 - Netatmo unavailable: skip entire run, log error
 - OpenAQ unavailable: skip AQI values, continue with rest
-- Never push empty/null values to Živý obraz
 
 ## Notes
 
-- Bind mounts require manual `mkdir -p` before Docker Swarm deploy — Swarm does NOT create them
 - GitHub Actions are pinned to commit hashes (not mutable tags) — Dependabot handles weekly updates
 - Trivy scanning is standard in CI
