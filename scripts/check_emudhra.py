@@ -40,10 +40,12 @@ for host in HOSTS:
     # ssl path (system CA store)
     try:
         ctx = ssl.create_default_context()
-        with socket.create_connection((host, 443), timeout=15) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host):
-                print(f"FAIL ssl {host}: connection accepted (vulnerable)")
-                failed = True
+        with (
+            socket.create_connection((host, 443), timeout=15) as sock,
+            ctx.wrap_socket(sock, server_hostname=host),
+        ):
+            print(f"FAIL ssl {host}: connection accepted (vulnerable)")
+            failed = True
     except ssl.SSLCertVerificationError:
         print(f"OK   ssl      {host}: certificate rejected")
     except OSError as exc:
