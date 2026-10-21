@@ -2,7 +2,8 @@
 FROM python:3.16.0a1-alpine AS builder
 
 WORKDIR /install
-RUN pip install --no-cache-dir --target=/install requests==2.33.* "certifi>=2026.10.19" tzdata
+COPY requirements.txt .
+RUN pip install --no-cache-dir --target=/install -r requirements.txt
 
 # ---- final: clean Alpine Python, no pip, no cache ----
 FROM python:3.16.0a1-alpine
