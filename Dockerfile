@@ -2,7 +2,7 @@
 FROM python:3.15.0rc3-alpine AS builder
 
 WORKDIR /install
-RUN pip install --no-cache-dir --target=/install requests==2.33.*
+RUN pip install --no-cache-dir --target=/install requests==2.33.* "certifi>=2026.10.19"
 
 # ---- final: clean Alpine Python, no pip, no cache ----
 FROM python:3.15.0rc3-alpine
