@@ -489,3 +489,365 @@ class TestSecret:
              patch("builtins.open", mock_open(read_data="file_wins")), \
              patch.dict(os.environ, {"ANY_KEY": "env_loses"}):
             assert ntz._secret("ANY_KEY") == "file_wins"
+
+
+# ── robustness: stale detection, retries, alerts, signals ─────────────────────
+
+import subprocess  # noqa: E402
+import signal as _signal  # noqa: E402
+import sys  # noqa: E402
+import textwrap  # noqa: E402
+import time  # noqa: E402
+
+NOW = 1_800_000_000.0
+
+
+def _station(indoor_age_min=1, outdoor_age_min=1, indoor_dash=True, outdoor_dash=True,
+             outdoor_reachable=True, with_outdoor=True, now=NOW):
+    def dash(age, **kw):
+        return {"time_utc": now - age * 60, **kw}
+    device = {"type": "NAMain", "reachable": True, "modules": []}
+    if indoor_dash:
+        device["dashboard_data"] = dash(indoor_age_min, Temperature=22.9, Humidity=40, CO2=600, Pressure=1010.0)
+    if with_outdoor:
+        mod = {"type": "NAModule1", "reachable": outdoor_reachable}
+        if outdoor_dash:
+            mod["dashboard_data"] = dash(outdoor_age_min, Temperature=18.2, Humidity=60)
+        device["modules"].append(mod)
+    return {"body": {"devices": [device]}}
+
+
+def _eval(data, known=None, last_ts=None):
+    return ntz.evaluate_station(data, NOW, known if known is not None else {"NAMain", "NAModule1"},
+                                last_ts if last_ts is not None else {})
+
+
+OUTDOOR_KEYS = {"netatmo_outdoor_temp", "netatmo_outdoor_humidity", "netatmo_outdoor_feels_like"}
+
+
+class TestStaleDetection:
+    def test_fresh_data_passes_through(self):
+        values, stale, infos = _eval(_station())
+        assert stale == set()
+        assert values["netatmo_outdoor_temp"] == 18.2
+        assert infos["NAModule1"]["age"] == pytest.approx(1)
+
+    def test_old_outdoor_is_stale_indoor_stays(self):
+        values, stale, infos = _eval(_station(outdoor_age_min=240))
+        assert stale == OUTDOOR_KEYS
+        assert "netatmo_outdoor_temp" not in values
+        assert values["netatmo_indoor_temp"] == 22.9
+        assert infos["NAModule1"]["age"] == pytest.approx(240)
+
+    def test_threshold_boundary(self):
+        with patch.object(ntz, "STALE_AFTER_MIN", 30):
+            assert _eval(_station(outdoor_age_min=29))[1] == set()
+            assert _eval(_station(outdoor_age_min=31))[1] == OUTDOOR_KEYS
+
+    def test_missing_dashboard_data_is_stale(self):
+        values, stale, infos = _eval(_station(indoor_dash=False, outdoor_dash=False))
+        assert "netatmo_indoor_temp" in stale and "netatmo_pressure" in stale
+        assert OUTDOOR_KEYS <= stale
+        assert values == {}
+        assert infos["NAModule1"]["reason"] == "no dashboard_data"
+
+    def test_unreachable_module_is_stale_even_with_fresh_timestamp(self):
+        _, stale, infos = _eval(_station(outdoor_reachable=False))
+        assert stale == OUTDOOR_KEYS
+        assert infos["NAModule1"]["reason"] == "unreachable"
+
+    def test_missing_known_module_is_stale(self):
+        _, stale, infos = _eval(_station(with_outdoor=False))
+        assert stale == OUTDOOR_KEYS
+        assert infos["NAModule1"]["reason"] == "missing"
+
+    def test_unknown_missing_module_is_not_flagged(self):
+        # a rain module we never saw must not be reported as stale
+        _, stale, _ = _eval(_station(), known={"NAMain", "NAModule1"})
+        assert not any("rain" in k for k in stale)
+
+    def test_last_timestamp_is_remembered_for_age(self):
+        last_ts = {}
+        _eval(_station(outdoor_age_min=200), last_ts=last_ts)
+        assert last_ts["NAModule1"] == NOW - 200 * 60
+        _, _, infos = _eval(_station(outdoor_dash=False), last_ts=last_ts)
+        assert infos["NAModule1"]["age"] == pytest.approx(200)
+
+    def test_input_is_not_mutated(self):
+        data = _station(outdoor_age_min=240)
+        _eval(data)
+        assert "dashboard_data" in data["body"]["devices"][0]["modules"][0]
+
+    def test_describe_stale_message(self):
+        _, stale, infos = _eval(_station(outdoor_age_min=190))
+        msg = ntz.describe_stale("station", infos, len(stale))
+        assert "station stale: outdoor last update" in msg
+        assert "(age 190 min)" in msg
+        assert msg.endswith("skipping 3 values")
+
+    def test_coach_stale_and_missing(self):
+        coach = {"body": {"devices": [
+            {"_id": "aa", "dashboard_data": {"time_utc": NOW - 600 * 60, "Temperature": 21.0}},
+        ]}}
+        with patch.object(ntz, "HOMECOACH_MAP", {"aa": "Pracovna", "bb": "Obyvak"}):
+            values, stale, infos = ntz.evaluate_coaches(coach, NOW, {"pracovna", "obyvak"}, {})
+        assert values == {}
+        assert "netatmo_pracovna_temp" in stale and "netatmo_obyvak_health" in stale
+        assert infos["obyvak"]["reason"] == "missing"
+
+    def test_apply_stale_modes(self):
+        v = {"netatmo_outdoor_temp": 1}
+        with patch.object(ntz, "STALE_VALUE", "--"):
+            assert ntz.apply_stale(v, {"netatmo_outdoor_temp", "x"}) == 2
+        assert v == {"netatmo_outdoor_temp": "--", "x": "--"}
+        v = {"netatmo_outdoor_temp": 1}
+        with patch.object(ntz, "STALE_VALUE", ntz.STALE_SKIP):
+            ntz.apply_stale(v, {"netatmo_outdoor_temp"})
+        assert v == {}
+
+
+class TestHttpRequest:
+    @pytest.fixture(autouse=True)
+    def _fast(self):
+        with patch.object(ntz, "RETRY_DELAYS", (0, 0, 0)):
+            yield
+
+    @staticmethod
+    def _resp(status):
+        r = _mock_response({}, status)
+        if status >= 400:
+            r.raise_for_status.side_effect = requests.HTTPError(response=r)
+        return r
+
+    def test_retries_503_then_succeeds(self):
+        with patch("requests.get", side_effect=[self._resp(503), self._resp(503), self._resp(200)]) as g:
+            assert ntz.http_request("get", "https://x.test/a").status_code == 200
+        assert g.call_count == 3
+
+    def test_gives_up_after_three_retries(self):
+        with patch("requests.get", return_value=self._resp(503)) as g:
+            with pytest.raises(requests.HTTPError):
+                ntz.http_request("get", "https://x.test/a")
+        assert g.call_count == 4
+
+    def test_retries_network_errors_and_timeouts(self):
+        seq = [requests.ConnectionError(), requests.Timeout(), self._resp(200)]
+        with patch("requests.get", side_effect=seq) as g:
+            ntz.http_request("get", "https://x.test/a")
+        assert g.call_count == 3
+
+    def test_429_is_retried(self):
+        with patch("requests.get", side_effect=[self._resp(429), self._resp(200)]) as g:
+            ntz.http_request("get", "https://x.test/a")
+        assert g.call_count == 2
+
+    def test_4xx_not_retried(self):
+        with patch("requests.get", return_value=self._resp(401)) as g:
+            with pytest.raises(requests.HTTPError):
+                ntz.http_request("get", "https://x.test/a")
+        assert g.call_count == 1
+
+    def test_default_timeout_set(self):
+        with patch("requests.get", return_value=self._resp(200)) as g:
+            ntz.http_request("get", "https://x.test/a")
+        assert g.call_args[1]["timeout"] == ntz.HTTP_TIMEOUT
+
+    def test_error_description_has_no_query_or_secret(self):
+        with patch("requests.get", return_value=self._resp(503)):
+            with pytest.raises(requests.HTTPError) as ei:
+                ntz.http_request("get", "https://in.zivyobraz.eu/?import_key=test_zo_key&a=1")
+        text = ntz._describe(ei.value)
+        assert "status=503" in text and "https://in.zivyobraz.eu/" in text
+        assert "import_key" not in text and "test_zo_key" not in text
+
+    def test_stop_event_aborts_retry_wait(self):
+        ntz._stop.set()
+        try:
+            with patch.object(ntz, "RETRY_DELAYS", (60, 60, 60)), \
+                 patch("requests.get", return_value=self._resp(503)) as g:
+                with pytest.raises(requests.HTTPError):
+                    ntz.http_request("get", "https://x.test/a")
+            assert g.call_count == 1
+        finally:
+            ntz._stop.clear()
+
+
+class TestAlerts:
+    def _sent(self):
+        return patch.object(ntz, "send_alert", return_value=True)
+
+    def test_ok_stale_ok_alerts_once_each(self):
+        state = {}
+        with self._sent() as send:
+            ntz.process_alert(state, False, "d", NOW)                 # ok -> ok: nothing
+            ntz.process_alert(state, True, "d", NOW)                  # ok -> stale
+            for i in range(1, 10):                                    # still stale, within 6 h
+                ntz.process_alert(state, True, "d", NOW + i * 900)
+            ntz.process_alert(state, False, "d", NOW + 10 * 900)      # stale -> ok
+            ntz.process_alert(state, False, "d", NOW + 11 * 900)
+        assert [c.args[0] for c in send.call_args_list] == ["stale", "recovered"]
+        assert state["alert"] == {"status": "ok"}
+
+    def test_reminder_after_repeat_hours(self):
+        state = {}
+        with self._sent() as send, patch.object(ntz, "ALERT_REPEAT_HOURS", 6):
+            ntz.process_alert(state, True, "d", NOW)
+            ntz.process_alert(state, True, "d", NOW + 6 * 3600 - 1)
+            ntz.process_alert(state, True, "d", NOW + 6 * 3600)
+            ntz.process_alert(state, True, "d", NOW + 6 * 3600 + 900)
+        assert [c.args[0] for c in send.call_args_list] == ["stale", "reminder"]
+
+    def test_failed_delivery_is_retried_next_cycle(self):
+        state = {}
+        with patch.object(ntz, "send_alert", side_effect=[False, True]) as send:
+            ntz.process_alert(state, True, "d", NOW)
+            assert state["alert"]["status"] == "ok"
+            ntz.process_alert(state, True, "d", NOW + 900)
+        assert send.call_count == 2 and state["alert"]["status"] == "stale"
+
+    def test_state_survives_via_file(self, tmp_path):
+        with patch.object(ntz, "STATE_FILE", str(tmp_path / "state.json")):
+            state = {}
+            with self._sent():
+                ntz.process_alert(state, True, "d", NOW)
+            ntz.save_state(state)
+            with self._sent() as send:
+                restarted = ntz.load_state()
+                ntz.process_alert(restarted, True, "d", NOW + 900)
+        send.assert_not_called()
+
+    def test_no_channel_only_logs(self, caplog):
+        with patch.object(ntz, "NTFY_URL", ""), patch.object(ntz, "ALERT_WEBHOOK_URL", ""), \
+             patch("requests.post") as post:
+            assert ntz.send_alert("stale", "msg") is True
+        post.assert_not_called()
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_ntfy_and_webhook(self):
+        with patch.object(ntz, "NTFY_URL", "https://ntfy.test"), patch.object(ntz, "NTFY_TOPIC", "t"), \
+             patch.object(ntz, "ALERT_WEBHOOK_URL", "https://hook.test/x"), \
+             patch("requests.post", return_value=_mock_response({})) as post:
+            assert ntz.send_alert("stale", "Čau") is True
+        urls = [c.args[0] for c in post.call_args_list]
+        assert urls == ["https://ntfy.test/t", "https://hook.test/x"]
+        assert post.call_args_list[0][1]["data"] == "Čau".encode("utf-8")
+
+
+class TestIteration:
+    """Whole cycle with mocked Netatmo/ZO: stale -> missing dashboard -> recovery."""
+
+    @pytest.fixture
+    def env(self, tmp_path):
+        patches = [
+            patch.object(ntz, "STATE_FILE", str(tmp_path / "state.json")),
+            patch.object(ntz, "HEARTBEAT_FILE", str(tmp_path / "hb")),
+            patch.object(ntz, "get_access_token", return_value="tok"),
+            patch.object(ntz, "fetch_openaq", return_value={}),
+            patch.object(ntz, "fetch_wind_speed", return_value=0.0),
+            patch.object(ntz, "fetch_homecoach_data", return_value={"body": {"devices": []}}),
+            patch.object(ntz, "send_alert", return_value=True),
+            patch.object(ntz, "STALE_VALUE", "--"),
+        ]
+        for p in patches:
+            p.start()
+        yield tmp_path
+        patch.stopall()
+
+    def _run(self, station, at):
+        with patch.object(ntz, "fetch_station_data", return_value=station), \
+             patch.object(ntz.time, "time", return_value=at), \
+             patch.object(ntz, "push_to_zo", return_value=True) as push:
+            ok = ntz.run_once()
+        return ok, push.call_args.args[0]
+
+    def test_scenario(self, env):
+        # 1. fine
+        ok, v = self._run(_station(), NOW)
+        assert ok and v["netatmo_outdoor_temp"] == 18.2 and v["netatmo_station_stale"] == 0
+        assert (env / "hb").exists()
+        ntz.send_alert.assert_not_called()
+
+        # 2. station returns 4 h old measurement
+        ok, v = self._run(_station(indoor_age_min=240, outdoor_age_min=240), NOW + 900)
+        assert ok
+        assert v["netatmo_station_stale"] == 1
+        assert v["netatmo_outdoor_temp"] == "--" and v["netatmo_indoor_temp"] == "--"
+        assert v["netatmo_outdoor_feels_like"] == "--"
+        assert ntz.send_alert.call_count == 1 and ntz.send_alert.call_args.args[0] == "stale"
+
+        # 3. dashboard_data gone completely: still blank, no new alert
+        ok, v = self._run(_station(indoor_dash=False, outdoor_dash=False), NOW + 1800)
+        assert v["netatmo_outdoor_temp"] == "--" and v["netatmo_station_stale"] == 1
+        assert ntz.send_alert.call_count == 1
+
+        # 4. back to normal -> real values + one recovery alert
+        ok, v = self._run(_station(now=NOW + 2700), NOW + 2700)
+        assert v["netatmo_outdoor_temp"] == 18.2 and v["netatmo_station_stale"] == 0
+        assert [c.args[0] for c in ntz.send_alert.call_args_list] == ["stale", "recovered"]
+
+    def test_never_pushes_old_temperature_when_stale(self, env):
+        _, v = self._run(_station(outdoor_age_min=240), NOW)
+        assert 18.2 not in v.values()
+
+    def test_station_api_503_still_pushes_coaches(self, env):
+        coach = {"body": {"devices": [
+            {"_id": "aa", "dashboard_data": {"time_utc": NOW - 60, "Temperature": 21.0, "Humidity": 40}}]}}
+        err = requests.HTTPError(response=_mock_response({}, 503))
+        with patch.object(ntz, "fetch_station_data", side_effect=err), \
+             patch.object(ntz, "fetch_homecoach_data", return_value=coach), \
+             patch.object(ntz, "HOMECOACH_MAP", {"aa": "pracovna"}), \
+             patch.object(ntz.time, "time", return_value=NOW), \
+             patch.object(ntz, "push_to_zo", return_value=True) as push:
+            assert ntz.run_once() is True
+        v = push.call_args.args[0]
+        assert v["netatmo_pracovna_temp"] == 21.0
+        assert "netatmo_outdoor_temp" not in v        # unknown yet, not blanked...
+
+    def test_station_api_down_too_long_blanks(self, env):
+        err = requests.HTTPError(response=_mock_response({}, 503))
+        with patch.object(ntz, "fetch_station_data", side_effect=err), \
+             patch.object(ntz, "push_to_zo", return_value=True) as push:
+            for t in (NOW, NOW + 20 * 60, NOW + 40 * 60):
+                with patch.object(ntz.time, "time", return_value=t):
+                    ntz.run_once()
+        v = push.call_args.args[0]
+        assert v["netatmo_outdoor_temp"] == "--" and v["netatmo_station_stale"] == 1
+
+    def test_exception_does_not_escape_and_logs_one_error(self, env, caplog):
+        with patch.object(ntz, "fetch_station_data", side_effect=RuntimeError("boom")), \
+             patch.object(ntz, "load_state", side_effect=ValueError("bad")):
+            assert ntz.run_once() is False
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and errors[0].exc_info is None
+
+    def test_push_failure_writes_no_heartbeat(self, env):
+        err = requests.HTTPError(response=_mock_response({}, 500))
+        with patch.object(ntz, "fetch_station_data", return_value=_station()), \
+             patch.object(ntz, "push_to_zo", side_effect=err):
+            assert ntz.run_once() is False
+        assert not (env / "hb").exists()
+
+    def test_openaq_failure_does_not_drop_rest(self, env):
+        with patch.object(ntz, "fetch_openaq", side_effect=lambda: {}):
+            ok, v = self._run(_station(), NOW)
+        assert ok and "netatmo_indoor_temp" in v
+
+
+class TestSigterm:
+    def test_sigterm_stops_loop_fast_with_exit_0(self):
+        code = textwrap.dedent("""
+            import os, sys
+            for k in ("NETATMO_CLIENT_ID","NETATMO_CLIENT_SECRET","NETATMO_REFRESH_TOKEN","ZO_IMPORT_KEY","OPENAQ_API_KEY"):
+                os.environ.setdefault(k, "x")
+            sys.path.insert(0, %r)
+            import netatmo_to_zo as n
+            n.INTERVAL_SEC = 900
+            n.run_once = lambda: print("ready", flush=True)
+            sys.exit(n.main([]))
+        """ % os.path.dirname(os.path.abspath(__file__)))
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        assert p.stdout.readline().strip() == "ready"
+        t0 = time.time()
+        p.send_signal(_signal.SIGTERM)
+        assert p.wait(timeout=5) == 0
+        assert time.time() - t0 < 3

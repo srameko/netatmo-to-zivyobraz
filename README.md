@@ -83,6 +83,26 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 | `LOCATION_LAT`          |          | Latitude for Open-Meteo wind fallback                  |
 | `LOCATION_LON`          |          | Longitude for Open-Meteo wind fallback                 |
 | `HOMECOACH_MAP`         |          | MAC→slug mapping: `AA:BB:CC:DD:EE:FF=pracovna,...`    |
+| `INTERVAL_SEC`          |          | Seconds between cycles (default `900`)                 |
+| `STALE_AFTER_MIN`       |          | Measurement older than this is stale (default `30`)    |
+| `STALE_VALUE`           |          | Pushed instead of stale values (default `--`; empty string = push empty; `@skip` = omit the key) |
+| `DISPLAY_TZ`            |          | Time zone of `netatmo_station_last_update` (default `Europe/Prague`) |
+| `ALERT_REPEAT_HOURS`    |          | Reminder while stale (default `6`, `0` = no reminders) |
+| `NTFY_URL`, `NTFY_TOPIC`|          | ntfy alerts (`NTFY_TOKEN` optional bearer token)       |
+| `ALERT_WEBHOOK_URL`     |          | Generic webhook, receives JSON `{event,title,message}` |
+| `LOG_LEVEL`             |          | `INFO` (default); `DEBUG` adds tracebacks              |
+| `STATE_FILE`            |          | Alert/freshness state (default `/data/state.json`)     |
+| `HEARTBEAT_FILE`        |          | Written after each successful push (default `/tmp/heartbeat`) |
+
+### Stale data
+
+Each module's `dashboard_data.time_utc` is checked. A module whose data is older than `STALE_AFTER_MIN`,
+is `reachable: false`, has no `dashboard_data` or is missing from the response is **stale**: its values
+(including derived ones, e.g. `netatmo_outdoor_feels_like`) are never sent as current but replaced by
+`STALE_VALUE`. Also pushed: `netatmo_station_stale` (0/1) and `netatmo_station_last_update` (local time
+of the oldest station measurement). If the Netatmo API itself keeps failing for longer than
+`STALE_AFTER_MIN`, the station/coach values are treated as stale too.
+Alerts (ntfy / webhook) are sent only on OK→stale and stale→OK, plus a reminder every `ALERT_REPEAT_HOURS`.
 
 Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) can be supplied as Docker Swarm secrets under `/run/secrets/<name>` or as plain environment variables.
 
@@ -105,6 +125,13 @@ netatmo-to-zivyobraz:
     - NETATMO_REFRESH_TOKEN
     - ZO_IMPORT_KEY
     - OPENAQ_API_KEY
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(time.time()-os.path.getmtime('/tmp/heartbeat')>2400)"]
+    interval: 5m
+    timeout: 10s
+    retries: 3
+    start_period: 5m
   deploy:
     replicas: 1
     placement:

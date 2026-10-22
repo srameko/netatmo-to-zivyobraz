@@ -5,13 +5,24 @@ Fetches data from the Netatmo API and OpenAQ, then pushes everything
 to Zivy obraz as custom values. Intended to run every 15 minutes.
 """
 
-import os
+import copy
 import json
 import logging
-import requests
+import os
+import signal
+import sys
+import threading
+import time
 import unicodedata
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+import requests
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 log = logging.getLogger(__name__)
 
 
@@ -47,6 +58,109 @@ HOMECOACH_MAP = {
 }
 
 TOKEN_FILE = "/data/netatmo_tokens.json"
+STATE_FILE = os.environ.get("STATE_FILE", "/data/state.json")
+HEARTBEAT_FILE = os.environ.get("HEARTBEAT_FILE", "/tmp/heartbeat")
+
+INTERVAL_SEC       = int(os.environ.get("INTERVAL_SEC", "900"))
+STALE_AFTER_MIN    = int(os.environ.get("STALE_AFTER_MIN", "30"))
+ALERT_REPEAT_HOURS = float(os.environ.get("ALERT_REPEAT_HOURS", "6"))
+DISPLAY_TZ         = os.environ.get("DISPLAY_TZ", "Europe/Prague")
+
+# What to push for values we refuse to send as current. "--" overwrites the old value on
+# the display; "" pushes an empty value; STALE_SKIP omits the key (old value stays).
+# How Zivy obraz handles an empty value is not documented - see README.
+STALE_SKIP  = "@skip"
+STALE_VALUE = os.environ.get("STALE_VALUE", "--")
+
+# Alert channels (all optional; read like the other secrets). Nothing set -> log only.
+NTFY_URL          = _secret("NTFY_URL", "")
+NTFY_TOPIC        = _secret("NTFY_TOPIC", "")
+NTFY_TOKEN        = _secret("NTFY_TOKEN", "")
+ALERT_WEBHOOK_URL = _secret("ALERT_WEBHOOK_URL", "")
+
+HTTP_TIMEOUT      = (5, 15)   # (connect, read) seconds
+PUSH_TIMEOUT      = (5, 20)
+RETRY_DELAYS      = (5, 15, 30)  # seconds before retry 1..3
+
+_stop = threading.Event()
+
+
+# ── HTTP helper ───────────────────────────────────────────────────────────────
+
+def _safe_url(url: str) -> str:
+    """scheme://host/path - never the query string or credentials."""
+    u = urlsplit(url)
+    return f"{u.scheme}://{u.hostname}{u.path}"
+
+
+def _redact(text: str) -> str:
+    for secret in (NETATMO_CLIENT_SECRET, NETATMO_REFRESH_TOKEN, ZO_IMPORT_KEY, OPENAQ_API_KEY,
+                   NTFY_TOKEN, NTFY_TOPIC, ALERT_WEBHOOK_URL):
+        if secret and len(secret) >= 6:
+            text = text.replace(secret, "***")
+    return text
+
+
+def _describe(exc: Exception) -> str:
+    """One-line, secret-free description of a failure (never str(exc): it may hold the full URL)."""
+    parts = [type(exc).__name__]
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        parts.append(f"status={resp.status_code}")
+    url = getattr(exc, "log_url", None)
+    if url:
+        parts.append(f"url={url}")
+    if resp is not None and 400 <= resp.status_code < 500 and resp.status_code != 429:
+        body = " ".join(str(resp.text).split())[:200]
+        if body:
+            parts.append(f"body={body}")
+    return _redact(" ".join(parts))
+
+
+def _fail(what: str, exc: Exception, level: int = logging.ERROR):
+    log.log(level, "%s failed: %s", what, _describe(exc))
+    log.debug("Traceback for %s", what, exc_info=exc)
+
+
+def _retryable(exc: Exception) -> bool:
+    if isinstance(exc, requests.HTTPError):
+        code = exc.response.status_code
+        return code >= 500 or code == 429
+    return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+
+
+def http_request(method: str, url: str, *, log_url: str | None = None, **kwargs):
+    """requests.<method> with a default timeout and retries (5xx, 429, network errors).
+
+    4xx other than 429 is raised at once. The raised exception carries `log_url`
+    (the URL without query string) for logging.
+    """
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            r = getattr(requests, method)(url, **kwargs)
+            r.raise_for_status()
+            return r
+        except requests.RequestException as e:
+            e.log_url = log_url or _safe_url(url)
+            if not _retryable(e) or attempt == len(RETRY_DELAYS):
+                raise
+            delay = RETRY_DELAYS[attempt]
+            log.warning("Retry %d/%d in %ds after %s", attempt + 1, len(RETRY_DELAYS), delay, _describe(e))
+            if _stop.wait(delay):  # shutting down - stop retrying
+                raise
+
+
+# ── tokens ────────────────────────────────────────────────────────────────────
+
+def _atomic_write(path: str, text: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def load_tokens() -> dict:
@@ -57,14 +171,13 @@ def load_tokens() -> dict:
 
 
 def save_tokens(tokens: dict):
-    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(tokens, f)
+    _atomic_write(TOKEN_FILE, json.dumps(tokens))
 
 
 def refresh_access_token(refresh_token: str) -> dict:
     log.info("Refreshing access token...")
-    r = requests.post(
+    r = http_request(
+        "post",
         "https://api.netatmo.com/oauth2/token",
         data={
             "grant_type":    "refresh_token",
@@ -72,9 +185,7 @@ def refresh_access_token(refresh_token: str) -> dict:
             "client_secret": NETATMO_CLIENT_SECRET,
             "refresh_token": refresh_token,
         },
-        timeout=10,
     )
-    r.raise_for_status()
     return r.json()
 
 
@@ -87,23 +198,21 @@ def get_access_token() -> str:
 
 def fetch_station_data(access_token: str) -> dict:
     log.info("Fetching station data...")
-    r = requests.get(
+    r = http_request(
+        "get",
         "https://api.netatmo.com/api/getstationsdata",
         headers={"Authorization": f"Bearer {access_token}"},
-        timeout=10,
     )
-    r.raise_for_status()
     return r.json()
 
 
 def fetch_homecoach_data(access_token: str) -> dict:
     log.info("Fetching Healthy Home Coach data...")
-    r = requests.get(
+    r = http_request(
+        "get",
         "https://api.netatmo.com/api/gethomecoachsdata",
         headers={"Authorization": f"Bearer {access_token}"},
-        timeout=10,
     )
-    r.raise_for_status()
     return r.json()
 
 
@@ -113,21 +222,20 @@ def fetch_wind_speed() -> float:
         log.warning("LOCATION_LAT/LON not set, skipping wind fetch")
         return 0.0
     try:
-        r = requests.get(
+        r = http_request(
+            "get",
             "https://api.open-meteo.com/v1/forecast",
             params={
                 "latitude":  LOCATION_LAT,
                 "longitude": LOCATION_LON,
                 "current":   "wind_speed_10m",
             },
-            timeout=10,
         )
-        r.raise_for_status()
         wind = r.json()["current"]["wind_speed_10m"]
         log.info("Wind speed: %s km/h", wind)
         return float(wind)
     except Exception as e:
-        log.warning("Failed to fetch wind speed: %s", e)
+        log.warning("Failed to fetch wind speed: %s", _describe(e))
         return 0.0
 
 
@@ -170,12 +278,11 @@ def fetch_openaq() -> dict:
     """Fetch latest pollutant values from OPENAQ_LOCATION_ID via OpenAQ v3 /sensors. Returns {} on failure."""
     try:
         headers = {"Accept": "application/json", "X-API-Key": OPENAQ_API_KEY}
-        r = requests.get(
+        r = http_request(
+            "get",
             f"https://api.openaq.org/v3/locations/{OPENAQ_LOCATION_ID}/sensors",
             headers=headers,
-            timeout=10,
         )
-        r.raise_for_status()
 
         pm25 = pm10 = no2 = o3 = None
         for sensor in r.json().get("results", []):
@@ -204,7 +311,7 @@ def fetch_openaq() -> dict:
                  OPENAQ_LOCATION_ID, pm25, pm10, no2, o3, out.get("openaq_aqi"))
         return out
     except Exception as e:
-        log.warning("OpenAQ fetch failed: %s", e)
+        log.warning("OpenAQ fetch failed: %s", _describe(e))
         return {}
 
 
@@ -312,6 +419,10 @@ def parse_measurements(data: dict) -> dict:
     return values
 
 
+def _coach_room(mac: str) -> str:
+    return HOMECOACH_MAP.get(mac, mac.replace(":", "_")[-4:])
+
+
 def parse_homecoach_measurements(data: dict) -> dict:
     """Returns measurements keyed by room slug (from HOMECOACH_MAP or MAC suffix)."""
     values = {}
@@ -320,7 +431,7 @@ def parse_homecoach_measurements(data: dict) -> dict:
         dash = device.get("dashboard_data", {})
         mac  = device.get("_id", "00:00:00:00:00:00")
 
-        room_raw = HOMECOACH_MAP.get(mac, mac.replace(":", "_")[-4:])
+        room_raw = _coach_room(mac)
         slug     = _slugify(room_raw)
         log.info("Coach device: id=%s room=%s slug=%s", mac, room_raw, slug)
 
@@ -338,52 +449,401 @@ def parse_homecoach_measurements(data: dict) -> dict:
     return values
 
 
-def push_to_zo(values: dict):
+# ── data freshness ────────────────────────────────────────────────────────────
+
+# Netatmo module type -> (name, keys that come from it, incl. derived ones)
+STATION_MODULES = {
+    "NAMain":    ("indoor",  ("netatmo_indoor_temp", "netatmo_indoor_humidity", "netatmo_indoor_co2",
+                              "netatmo_pressure", "netatmo_indoor_health")),
+    "NAModule1": ("outdoor", ("netatmo_outdoor_temp", "netatmo_outdoor_humidity",
+                              "netatmo_outdoor_feels_like")),
+    "NAModule2": ("wind",    ("netatmo_wind_speed", "netatmo_wind_gust", "netatmo_wind_angle",
+                              "netatmo_wind_max")),
+    "NAModule3": ("rain",    ("netatmo_rain_current", "netatmo_rain_1h", "netatmo_rain_24h")),
+}
+DEFAULT_STATION_MODULES = ("NAMain", "NAModule1")
+COACH_FIELDS = ("temp", "humidity", "co2", "noise", "health")
+
+
+def _utc_hm(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%H:%MZ")
+
+
+def _local_dt(ts: float) -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(DISPLAY_TZ)
+    except Exception:
+        tz = timezone.utc
+    return datetime.fromtimestamp(ts, tz).strftime("%d.%m. %H:%M")
+
+
+def _check(name: str, node: dict | None, fallback_ts: float | None, now: float,
+           missing_reason: str = "missing") -> dict:
+    """Judge one module/device. `fallback_ts` = last timestamp we saw for it earlier."""
+    dash = (node or {}).get("dashboard_data") or {}
+    raw = dash.get("time_utc")
+    seen_ts = raw if isinstance(raw, (int, float)) else None
+    ts = seen_ts if seen_ts is not None else fallback_ts
+    age = (now - ts) / 60 if ts is not None else None
+    if node is None:
+        reason = missing_reason
+    elif not dash:
+        reason = "no dashboard_data"
+    elif node.get("reachable") is False:
+        reason = "unreachable"
+    elif seen_ts is None:
+        reason = "no timestamp"
+    elif age > STALE_AFTER_MIN:
+        reason = "too old"
+    else:
+        reason = None
+    return {"name": name, "stale": reason is not None, "reason": reason, "ts": ts, "age": age,
+            "seen_ts": seen_ts}
+
+
+def evaluate_station(data: dict, now: float, known: set, last_ts: dict,
+                     missing_reason: str = "missing") -> tuple[dict, set, dict]:
+    """Parse station data, dropping everything that is stale.
+
+    Returns (values, stale_keys, infos keyed by module type). `known` (module types seen so
+    far) and `last_ts` (module type -> last measurement time) are updated in place.
+    """
+    data = copy.deepcopy(data)
+    infos = {}
+
+    def visit(node):
+        mtype = node.get("type")
+        if mtype not in STATION_MODULES:
+            return
+        info = _check(STATION_MODULES[mtype][0], node, last_ts.get(mtype), now)
+        infos[mtype] = info
+        known.add(mtype)
+        if info["seen_ts"] is not None:
+            last_ts[mtype] = info["seen_ts"]
+        if info["stale"]:
+            node["dashboard_data"] = {}
+
+    for device in data.get("body", {}).get("devices", []):
+        device.setdefault("type", "NAMain")
+        visit(device)
+        for module in device.get("modules", []):
+            visit(module)
+
+    for mtype in known:
+        if mtype not in infos:
+            infos[mtype] = _check(STATION_MODULES[mtype][0], None, last_ts.get(mtype), now, missing_reason)
+
+    stale_keys = {k for t, i in infos.items() if i["stale"] for k in STATION_MODULES[t][1]}
+    return parse_measurements(data), stale_keys, infos
+
+
+def evaluate_coaches(data: dict, now: float, known: set, last_ts: dict,
+                     missing_reason: str = "missing") -> tuple[dict, set, dict]:
+    """Like evaluate_station for Home Coach devices; `known`/`last_ts` are keyed by room slug."""
+    data = copy.deepcopy(data)
+    infos = {}
+    for device in data.get("body", {}).get("devices", []):
+        slug = _slugify(_coach_room(device.get("_id", "00:00:00:00:00:00")))
+        info = _check(slug, device, last_ts.get(slug), now)
+        infos[slug] = info
+        known.add(slug)
+        if info["seen_ts"] is not None:
+            last_ts[slug] = info["seen_ts"]
+        if info["stale"]:
+            device["dashboard_data"] = {}
+
+    for slug in known:
+        if slug not in infos:
+            infos[slug] = _check(slug, None, last_ts.get(slug), now, missing_reason)
+
+    stale_keys = {f"netatmo_{slug}_{f}" for slug, i in infos.items() if i["stale"] for f in COACH_FIELDS}
+    return parse_homecoach_measurements(data), stale_keys, infos
+
+
+def describe_stale(source: str, infos: dict, n_values: int) -> str:
+    parts = []
+    for info in sorted((i for i in infos.values() if i["stale"]), key=lambda i: i["name"]):
+        if info["ts"] is not None:
+            text = f"{info['name']} last update {_utc_hm(info['ts'])} (age {info['age']:.0f} min)"
+            if info["reason"] != "too old":
+                text += f" [{info['reason']}]"
+        else:
+            text = f"{info['name']} no data [{info['reason']}]"
+        parts.append(text)
+    return f"{source} stale: {'; '.join(parts)}, skipping {n_values} values"
+
+
+def describe_ages(infos: dict) -> str:
+    return " ".join(
+        f"{i['name']}={'?' if i['age'] is None else format(i['age'], '.0f')}min{'(stale)' if i['stale'] else ''}"
+        for i in sorted(infos.values(), key=lambda i: i["name"])
+    )
+
+
+def apply_stale(values: dict, stale_keys: set) -> int:
+    """Replace stale values by STALE_VALUE (or drop them in skip mode). Returns the number of keys."""
+    for k in stale_keys:
+        values.pop(k, None)
+        if STALE_VALUE != STALE_SKIP:
+            values[k] = STALE_VALUE
+    return len(stale_keys)
+
+
+# ── persistent state (/data) ──────────────────────────────────────────────────
+
+def load_state() -> dict:
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+        return state if isinstance(state, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        log.warning("Ignoring unreadable state file: %s", type(e).__name__)
+        return {}
+
+
+def save_state(state: dict):
+    try:
+        _atomic_write(STATE_FILE, json.dumps(state))
+    except OSError as e:
+        log.warning("Cannot save state file: %s", type(e).__name__)
+
+
+# ── alerts ────────────────────────────────────────────────────────────────────
+
+def send_alert(event: str, message: str) -> bool:
+    """Send via ntfy and/or webhook. True when delivered (or when no channel is configured)."""
+    titles = {"stale": "Netatmo station: stale data", "reminder": "Netatmo station: still stale",
+              "recovered": "Netatmo station: recovered"}
+    title = titles[event]
+    configured = delivered = False
+
+    if NTFY_URL and NTFY_TOPIC:
+        configured = True
+        headers = {"Title": title,
+                   "Priority": "default" if event == "recovered" else "high",
+                   "Tags": "white_check_mark" if event == "recovered" else "warning"}
+        if NTFY_TOKEN:
+            headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
+        try:
+            http_request("post", f"{NTFY_URL.rstrip('/')}/{NTFY_TOPIC}", data=message.encode("utf-8"),
+                         headers=headers, log_url="ntfy")
+            delivered = True
+        except Exception as e:
+            _fail("ntfy alert", e, logging.WARNING)
+
+    if ALERT_WEBHOOK_URL:
+        configured = True
+        try:
+            http_request("post", ALERT_WEBHOOK_URL, json={"event": event, "title": title, "message": message},
+                         log_url="webhook")
+            delivered = True
+        except Exception as e:
+            _fail("webhook alert", e, logging.WARNING)
+
+    if not configured:
+        log.warning("ALERT (%s, no alert channel configured): %s", event, message)
+        return True
+    return delivered
+
+
+def process_alert(state: dict, stale: bool, detail: str, now: float):
+    """Alert on ok->stale and stale->ok, plus a reminder every ALERT_REPEAT_HOURS while stale."""
+    alert = state.setdefault("alert", {"status": "ok"})
+    was_stale = alert.get("status") == "stale"
+    if stale and not was_stale:
+        event, message = "stale", f"Netatmo station is not sending current data: {detail}"
+    elif not stale and was_stale:
+        event, message = "recovered", "Netatmo station is sending current data again."
+    elif (stale and ALERT_REPEAT_HOURS > 0
+          and now - alert.get("last_alert", now) >= ALERT_REPEAT_HOURS * 3600):
+        hours = (now - alert.get("since", now)) / 3600
+        event, message = "reminder", f"Netatmo station has been stale for {hours:.1f} h: {detail}"
+    else:
+        return
+    if not send_alert(event, message):
+        return  # state unchanged -> next cycle tries again
+    if stale:
+        alert.update(status="stale", last_alert=now, since=alert.get("since", now) if was_stale else now)
+    else:
+        state["alert"] = {"status": "ok"}
+
+
+# ── output ────────────────────────────────────────────────────────────────────
+
+def push_to_zo(values: dict) -> bool:
     if not values:
         log.warning("No values to push")
-        return
+        return False
     params = {"import_key": ZO_IMPORT_KEY, **values}
     log.info("Pushing %d values to Zivy obraz...", len(values))
-    r = requests.get("https://in.zivyobraz.eu/", params=params, timeout=10)
-    r.raise_for_status()
+    r = http_request("get", "https://in.zivyobraz.eu/", params=params, timeout=PUSH_TIMEOUT)
     log.info("OK: %s", r.text.strip())
+    return True
 
 
-def main():
+def write_heartbeat():
+    try:
+        with open(HEARTBEAT_FILE, "w") as f:
+            f.write(str(int(time.time())))
+    except OSError as e:
+        log.warning("Cannot write heartbeat: %s", type(e).__name__)
+
+
+# ── main loop ─────────────────────────────────────────────────────────────────
+
+def _down_too_long(state: dict, source: str, now: float) -> bool:
+    """True when the API has been failing for longer than STALE_AFTER_MIN."""
+    return now - state.setdefault("last_ok", {}).setdefault(source, now) > STALE_AFTER_MIN * 60
+
+
+def _iteration() -> bool:
+    now = time.time()
+    state = load_state()
+    last_ts = state.setdefault("last_ts", {})
+    known_modules = set(state.get("known_modules", DEFAULT_STATION_MODULES))
+    known_coaches = set(state.get("known_coaches", ())) | {_slugify(v) for v in HOMECOACH_MAP.values()}
+
+    token = None
     try:
         token = get_access_token()
+    except Exception as e:
+        _fail("Netatmo token refresh", e)
 
-        station_data = fetch_station_data(token)
-        coach_data   = fetch_homecoach_data(token)
+    def fetch(what, fn):
+        if token is None or _stop.is_set():
+            return None
+        try:
+            return fn(token)
+        except Exception as e:
+            _fail(what, e)
+            return None
 
-        values = {}
-        values.update(parse_measurements(station_data))
-        values.update(parse_homecoach_measurements(coach_data))
+    station_data = fetch("Netatmo station fetch", fetch_station_data)
+    coach_data   = fetch("Netatmo homecoach fetch", fetch_homecoach_data)
+    if _stop.is_set():
+        return False
 
-        log.info("Measurements: %s", values)
+    values = {}
+    stale_by_source = {}
 
-        # Air quality from OpenAQ / ČHMÚ
-        values.update(fetch_openaq())
+    # station
+    st_last = {k.split(":", 1)[1]: v for k, v in last_ts.items() if k.startswith("station:")}
+    station_infos = None
+    if station_data is not None:
+        state.setdefault("last_ok", {})["station"] = now
+        v, k, station_infos = evaluate_station(station_data, now, known_modules, st_last)
+    elif _down_too_long(state, "station", now):
+        v, k, station_infos = evaluate_station({}, now, known_modules, st_last, "api unavailable")
+    if station_infos is not None:
+        values.update(v)
+        stale_by_source["station"] = k
+        last_ts.update({f"station:{t}": ts for t, ts in st_last.items()})
 
-        # Use Netatmo wind if available, otherwise fall back to Open-Meteo
+    # home coaches
+    co_last = {k.split(":", 1)[1]: v for k, v in last_ts.items() if k.startswith("coach:")}
+    coach_infos = None
+    if coach_data is not None:
+        state.setdefault("last_ok", {})["coach"] = now
+        v, k, coach_infos = evaluate_coaches(coach_data, now, known_coaches, co_last)
+    elif _down_too_long(state, "coach", now):
+        v, k, coach_infos = evaluate_coaches({}, now, known_coaches, co_last, "api unavailable")
+    if coach_infos is not None:
+        values.update(v)
+        stale_by_source["coach"] = k
+        last_ts.update({f"coach:{s}": ts for s, ts in co_last.items()})
+
+    state["known_modules"] = sorted(known_modules)
+    state["known_coaches"] = sorted(known_coaches)
+
+    ages = {}
+    if station_infos:
+        ages.update({f"station.{i['name']}": i for i in station_infos.values()})
+    if coach_infos:
+        ages.update({f"coach.{i['name']}": i for i in coach_infos.values()})
+    log.info("Measurements: %s", values)
+    if ages:
+        log.info("Measurement ages: %s", describe_ages(ages))
+    for source, infos in (("station", station_infos), ("coach", coach_infos)):
+        if infos and any(i["stale"] for i in infos.values()):
+            keys = sorted(stale_by_source[source])
+            log.warning(describe_stale(source, infos, len(keys)))
+            log.warning("%s stale keys: %s", source, ", ".join(keys))
+
+    # air quality from OpenAQ / ČHMÚ (failures are handled inside)
+    values.update(fetch_openaq())
+
+    # derived station values - only from fresh data
+    outdoor_temp = values.get("netatmo_outdoor_temp")
+    if isinstance(outdoor_temp, (int, float)):
         wind_kmh = float(values.get("netatmo_wind_speed", 0) or fetch_wind_speed())
-
-        outdoor_temp     = values.get("netatmo_outdoor_temp", 20.0)
         outdoor_humidity = values.get("netatmo_outdoor_humidity", 50)
-        if isinstance(outdoor_temp, (int, float)) and isinstance(outdoor_humidity, (int, float)):
+        if isinstance(outdoor_humidity, (int, float)):
             values["netatmo_outdoor_feels_like"] = feels_like(outdoor_temp, outdoor_humidity, wind_kmh)
+    co2 = values.get("netatmo_indoor_co2")
+    hum = values.get("netatmo_indoor_humidity")
+    if isinstance(co2, int) and isinstance(hum, int):
+        values["netatmo_indoor_health"] = health_label(_health_score(co2, hum))
 
-        # Indoor module health index (computed from CO2 + humidity)
-        co2 = values.get("netatmo_indoor_co2")
-        hum = values.get("netatmo_indoor_humidity")
-        if isinstance(co2, int) and isinstance(hum, int):
-            values["netatmo_indoor_health"] = health_label(_health_score(co2, hum))
+    # station status for the display template + alerting
+    if station_infos is not None:
+        station_stale = any(i["stale"] for i in station_infos.values())
+        values["netatmo_station_stale"] = int(station_stale)
+        tss = [i["ts"] for i in station_infos.values() if i["ts"] is not None]
+        if tss:
+            values["netatmo_station_last_update"] = _local_dt(min(tss))
+        try:
+            process_alert(state, station_stale,
+                          describe_stale("station", station_infos, len(stale_by_source["station"])), now)
+        except Exception as e:
+            _fail("alert processing", e)
 
-        push_to_zo(values)
-    except requests.HTTPError as e:
-        log.error("HTTP %s: %s", e.response.status_code, e.response.text)
-        raise
+    blanked = apply_stale(values, set().union(*stale_by_source.values()))
+    save_state(state)
+    if _stop.is_set():
+        return False
+    if blanked:
+        log.info("%d stale values %s", blanked,
+                 "omitted" if STALE_VALUE == STALE_SKIP else f"replaced by {STALE_VALUE!r}")
+    try:
+        if not push_to_zo(values):
+            return False
+    except Exception as e:
+        _fail("Zivy obraz push", e)
+        return False
+    write_heartbeat()
+    return True
+
+
+def run_once() -> bool:
+    """One full cycle. Never raises; a failure is one ERROR line (traceback at DEBUG)."""
+    try:
+        return _iteration()
+    except Exception as e:
+        _fail("Iteration", e)
+        return False
+
+
+def _on_signal(signum, frame):
+    _stop.set()  # no logging here: it could deadlock on the logging lock
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+    if "--once" in argv:
+        return 0 if run_once() else 1
+    log.info("Starting, interval %d s, stale after %d min", INTERVAL_SEC, STALE_AFTER_MIN)
+    while not _stop.is_set():
+        run_once()
+        if _stop.wait(INTERVAL_SEC):
+            break
+    log.info("Stopping on signal")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
