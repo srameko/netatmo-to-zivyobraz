@@ -77,6 +77,8 @@ NTFY_URL          = _secret("NTFY_URL", "")
 NTFY_TOPIC        = _secret("NTFY_TOPIC", "")
 NTFY_TOKEN        = _secret("NTFY_TOKEN", "")
 ALERT_WEBHOOK_URL = _secret("ALERT_WEBHOOK_URL", "")
+CALLMEBOT_PHONE   = _secret("CALLMEBOT_PHONE", "")    # WhatsApp via callmebot.com, e.g. +420123456789
+CALLMEBOT_APIKEY  = _secret("CALLMEBOT_APIKEY", "")
 
 HTTP_TIMEOUT      = (5, 15)   # (connect, read) seconds
 PUSH_TIMEOUT      = (5, 20)
@@ -95,7 +97,7 @@ def _safe_url(url: str) -> str:
 
 def _redact(text: str) -> str:
     for secret in (NETATMO_CLIENT_SECRET, NETATMO_REFRESH_TOKEN, ZO_IMPORT_KEY, OPENAQ_API_KEY,
-                   NTFY_TOKEN, NTFY_TOPIC, ALERT_WEBHOOK_URL):
+                   NTFY_TOKEN, NTFY_TOPIC, ALERT_WEBHOOK_URL, CALLMEBOT_APIKEY, CALLMEBOT_PHONE):
         if secret and len(secret) >= 6:
             text = text.replace(secret, "***")
     return text
@@ -642,6 +644,17 @@ def send_alert(event: str, message: str) -> bool:
             delivered = True
         except Exception as e:
             _fail("webhook alert", e, logging.WARNING)
+
+    if CALLMEBOT_PHONE and CALLMEBOT_APIKEY:
+        configured = True
+        try:
+            # CallMeBot only takes GET; apikey is in the query, so the URL is never logged
+            http_request("get", "https://api.callmebot.com/whatsapp.php", log_url="callmebot",
+                         params={"phone": CALLMEBOT_PHONE, "text": f"{title}\n{message}",
+                                 "apikey": CALLMEBOT_APIKEY})
+            delivered = True
+        except Exception as e:
+            _fail("callmebot alert", e, logging.WARNING)
 
     if not configured:
         log.warning("ALERT (%s, no alert channel configured): %s", event, message)

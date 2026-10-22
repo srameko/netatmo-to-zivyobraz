@@ -89,6 +89,7 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 | `DISPLAY_TZ`            |          | Time zone of `netatmo_station_last_update` (default `Europe/Prague`) |
 | `ALERT_REPEAT_HOURS`    |          | Reminder while stale (default `6`, `0` = no reminders) |
 | `NTFY_URL`, `NTFY_TOPIC`|          | ntfy alerts (`NTFY_TOKEN` optional bearer token)       |
+| `CALLMEBOT_PHONE`, `CALLMEBOT_APIKEY` |  | WhatsApp alerts via callmebot.com                 |
 | `ALERT_WEBHOOK_URL`     |          | Generic webhook, receives JSON `{event,title,message}` |
 | `LOG_LEVEL`             |          | `INFO` (default); `DEBUG` adds tracebacks              |
 | `STATE_FILE`            |          | Alert/freshness state (default `/data/state.json`)     |

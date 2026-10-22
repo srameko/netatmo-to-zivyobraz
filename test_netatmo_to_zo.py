@@ -733,6 +733,27 @@ class TestAlerts:
         assert post.call_args_list[0][1]["data"] == "Čau".encode("utf-8")
 
 
+class TestCallmebot:
+    def test_sends_get_with_encoded_params_and_hides_key(self, caplog):
+        with patch.object(ntz, "NTFY_URL", ""), patch.object(ntz, "ALERT_WEBHOOK_URL", ""), \
+             patch.object(ntz, "CALLMEBOT_PHONE", "+420111222333"), \
+             patch.object(ntz, "CALLMEBOT_APIKEY", "key123456"), \
+             patch("requests.get", return_value=_mock_response({})) as get:
+            assert ntz.send_alert("stale", "Čau & ahoj") is True
+        assert get.call_args.args[0] == "https://api.callmebot.com/whatsapp.php"
+        params = get.call_args[1]["params"]
+        assert params["phone"] == "+420111222333" and "Čau & ahoj" in params["text"]
+
+    def test_failure_returns_false_and_logs_no_key(self, caplog):
+        err = requests.HTTPError(response=_mock_response({}, 400))
+        with patch.object(ntz, "NTFY_URL", ""), patch.object(ntz, "ALERT_WEBHOOK_URL", ""), \
+             patch.object(ntz, "CALLMEBOT_PHONE", "+420111222333"), \
+             patch.object(ntz, "CALLMEBOT_APIKEY", "key123456"), \
+             patch("requests.get", side_effect=err):
+            assert ntz.send_alert("stale", "x") is False
+        assert "key123456" not in caplog.text and "+420111222333" not in caplog.text
+
+
 class TestIteration:
     """Whole cycle with mocked Netatmo/ZO: stale -> missing dashboard -> recovery."""
 
