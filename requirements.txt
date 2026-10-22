@@ -1,0 +1,3 @@
+requests==2.33.*
+certifi>=2026.10.19
+tzdata
