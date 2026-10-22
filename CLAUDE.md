@@ -66,7 +66,7 @@ Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portaine
 
 ## Container
 
-- Single Python container, Alpine, cron every 15 minutes
+- Single Python container, Alpine; the script loops itself every `INTERVAL_SEC` (900 s) and handles SIGTERM (exit 0). No `init: true` (not allowed in swarm stacks)
 - Multi-stage Alpine Dockerfile: builder installs deps, final image copies — no pip in production
 - Built for `linux/arm64` (RPi 5)
 - Image: `ghcr.io/srameko/netatmo-to-zivyobraz`
@@ -78,12 +78,13 @@ Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portaine
 
 - Push via GET: `https://in.zivyobraz.eu/?import_key=KEY&param=value&param2=value2`
 - All values in a single GET request per run
-- Do not push null or empty values — skip missing metrics silently
+- Do not push null values. Exception: stale/missing station or coach data is overwritten with `STALE_VALUE` (default `--`) so the display never shows an old reading
 
 ## Error Handling
 
 - Netatmo token expired: refresh using refresh token, retry once, persist new token
-- Netatmo unavailable: skip entire run, log error
+- Every HTTP call has a timeout and retries 5xx/429/network errors (5/15/30 s); one failing source never blocks the others; an iteration failure is one ERROR line (traceback at `LOG_LEVEL=DEBUG`)
+- Data older than `STALE_AFTER_MIN` is stale -> see README; alerts only on state change (state in `/data/state.json`)
 - OpenAQ unavailable: skip AQI values, continue with rest
 
 ## Notes
