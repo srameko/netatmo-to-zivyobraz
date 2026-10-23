@@ -754,6 +754,32 @@ class TestCallmebot:
         assert "key123456" not in caplog.text and "+420111222333" not in caplog.text
 
 
+class TestCallmebotResponse:
+    def _send(self, text):
+        resp = _mock_response({})
+        resp.text = text
+        with patch.object(ntz, "NTFY_URL", ""), patch.object(ntz, "ALERT_WEBHOOK_URL", ""), \
+             patch.object(ntz, "CALLMEBOT_PHONE", "+420111222333"), \
+             patch.object(ntz, "CALLMEBOT_APIKEY", "key123456"), \
+             patch("requests.get", return_value=resp):
+            return ntz.send_alert("stale", "x")
+
+    def test_paused_is_error_and_not_delivered(self, caplog):
+        assert self._send("<b>Account Paused</b>") is False
+        assert any(r.levelname == "ERROR" and "Paused" in r.message for r in caplog.records)
+
+    def test_normal_reply_is_delivered(self):
+        assert self._send("Message queued. You will receive it in a few seconds.") is True
+
+
+class TestRecoveryMessage:
+    def test_contains_outage_duration(self):
+        state = {"alert": {"status": "stale", "since": NOW, "last_alert": NOW}}
+        with patch.object(ntz, "send_alert", return_value=True) as send:
+            ntz.process_alert(state, False, "d", NOW + 4 * 3600 + 50 * 60)
+        assert "4 h 50 min" in send.call_args.args[1]
+
+
 class TestIteration:
     """Whole cycle with mocked Netatmo/ZO: stale -> missing dashboard -> recovery."""
 
@@ -805,6 +831,15 @@ class TestIteration:
         ok, v = self._run(_station(now=NOW + 2700), NOW + 2700)
         assert v["netatmo_outdoor_temp"] == 18.2 and v["netatmo_station_stale"] == 0
         assert [c.args[0] for c in ntz.send_alert.call_args_list] == ["stale", "recovered"]
+
+    def test_unreachable_main_module_never_yields_fake_20(self, env):
+        data = _station(indoor_age_min=300, outdoor_age_min=300)
+        dev = data["body"]["devices"][0]
+        dev["reachable"] = False
+        dev["modules"][0]["reachable"] = False
+        _, v = self._run(data, NOW)
+        assert 20.0 not in v.values()
+        assert v["netatmo_outdoor_feels_like"] == "--" and v["netatmo_station_stale"] == 1
 
     def test_never_pushes_old_temperature_when_stale(self, env):
         _, v = self._run(_station(outdoor_age_min=240), NOW)
