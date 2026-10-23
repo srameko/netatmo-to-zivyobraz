@@ -754,6 +754,31 @@ class TestCallmebot:
         assert "key123456" not in caplog.text and "+420111222333" not in caplog.text
 
 
+class TestCzechAlerts:
+    def test_czech_local_time_message(self):
+        _, stale, infos = _eval(_station(outdoor_age_min=190))
+        with patch.object(ntz, "DISPLAY_TZ", "UTC"):
+            msg = ntz.describe_stale_cs(infos, len(stale))
+        assert msg.startswith("Venku: poslední měření v ")
+        assert "(před 190 min)" in msg and msg.endswith("Dotčených hodnot: 3.")
+        assert "UTC" not in msg and "Z" not in msg.split("(")[0][-6:]
+
+    def test_log_message_says_utc(self):
+        _, stale, infos = _eval(_station(outdoor_age_min=190))
+        assert " UTC (age 190 min)" in ntz.describe_stale("station", infos, len(stale))
+
+    def test_unreachable_reason_in_czech(self):
+        _, stale, infos = _eval(_station(outdoor_reachable=False))
+        assert "modul nedostupný" in ntz.describe_stale_cs(infos, len(stale))
+
+    def test_ntfy_title_is_header_safe(self):
+        with patch.object(ntz, "NTFY_URL", "https://ntfy.test"), patch.object(ntz, "NTFY_TOPIC", "t"), \
+             patch.object(ntz, "ALERT_WEBHOOK_URL", ""), patch.object(ntz, "CALLMEBOT_PHONE", ""), \
+             patch("requests.post", return_value=_mock_response({})) as post:
+            ntz.send_alert("stale", "x")
+        post.call_args[1]["headers"]["Title"].encode("latin-1")  # must not raise
+
+
 class TestCallmebotResponse:
     def _send(self, text):
         resp = _mock_response({})
