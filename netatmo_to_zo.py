@@ -15,6 +15,7 @@ import threading
 import time
 import unicodedata
 from datetime import datetime, timezone
+from email.header import Header
 from urllib.parse import urlsplit
 
 import requests
@@ -468,16 +469,23 @@ COACH_FIELDS = ("temp", "humidity", "co2", "noise", "health")
 
 
 def _utc_hm(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).strftime("%H:%MZ")
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%H:%M UTC")
+
+
+def _tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(DISPLAY_TZ)
+    except Exception:
+        return timezone.utc
 
 
 def _local_dt(ts: float) -> str:
-    try:
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(DISPLAY_TZ)
-    except Exception:
-        tz = timezone.utc
-    return datetime.fromtimestamp(ts, tz).strftime("%d.%m. %H:%M")
+    return datetime.fromtimestamp(ts, _tz()).strftime("%d.%m. %H:%M")
+
+
+def _local_hm(ts: float) -> str:
+    return datetime.fromtimestamp(ts, _tz()).strftime("%H:%M")
 
 
 def _check(name: str, node: dict | None, fallback_ts: float | None, now: float,
@@ -576,6 +584,25 @@ def describe_stale(source: str, infos: dict, n_values: int) -> str:
     return f"{source} stale: {'; '.join(parts)}, skipping {n_values} values"
 
 
+_CS_NAMES = {"indoor": "uvnitř", "outdoor": "venku", "wind": "vítr", "rain": "srážky"}
+_CS_REASONS = {"unreachable": "modul nedostupný", "missing": "modul chybí", "no dashboard_data": "bez dat",
+               "no timestamp": "bez časové značky", "api unavailable": "Netatmo API nedostupné"}
+
+
+def describe_stale_cs(infos: dict, n_values: int) -> str:
+    """Czech, local-time description for alerts."""
+    parts = []
+    for info in sorted((i for i in infos.values() if i["stale"]), key=lambda i: i["name"]):
+        name = _CS_NAMES.get(info["name"], info["name"]).capitalize()
+        reason = _CS_REASONS.get(info["reason"])
+        if info["ts"] is not None:
+            text = f"{name}: poslední měření v {_local_hm(info['ts'])} (před {info['age']:.0f} min)"
+        else:
+            text = f"{name}: žádná data"
+        parts.append(text + (f", {reason}" if reason else ""))
+    return "; ".join(parts) + f". Dotčených hodnot: {n_values}."
+
+
 def describe_ages(infos: dict) -> str:
     return " ".join(
         f"{i['name']}={'?' if i['age'] is None else format(i['age'], '.0f')}min{'(stale)' if i['stale'] else ''}"
@@ -617,14 +644,14 @@ def save_state(state: dict):
 
 def send_alert(event: str, message: str) -> bool:
     """Send via ntfy and/or webhook. True when delivered (or when no channel is configured)."""
-    titles = {"stale": "Netatmo station: stale data", "reminder": "Netatmo station: still stale",
-              "recovered": "Netatmo station: recovered"}
+    titles = {"stale": "Netatmo: zastaralá data", "reminder": "Netatmo: data stále zastaralá",
+              "recovered": "Netatmo: stanice obnovena"}
     title = titles[event]
     configured = delivered = False
 
     if NTFY_URL and NTFY_TOPIC:
         configured = True
-        headers = {"Title": title,
+        headers = {"Title": Header(title, "utf-8").encode(),  # RFC 2047, HTTP headers are not UTF-8
                    "Priority": "default" if event == "recovered" else "high",
                    "Tags": "white_check_mark" if event == "recovered" else "warning"}
         if NTFY_TOKEN:
@@ -633,6 +660,7 @@ def send_alert(event: str, message: str) -> bool:
             http_request("post", f"{NTFY_URL.rstrip('/')}/{NTFY_TOPIC}", data=message.encode("utf-8"),
                          headers=headers, log_url="ntfy")
             delivered = True
+            log.info("Alert sent via ntfy: %s", event)
         except Exception as e:
             _fail("ntfy alert", e, logging.WARNING)
 
@@ -642,6 +670,7 @@ def send_alert(event: str, message: str) -> bool:
             http_request("post", ALERT_WEBHOOK_URL, json={"event": event, "title": title, "message": message},
                          log_url="webhook")
             delivered = True
+            log.info("Alert sent via webhook: %s", event)
         except Exception as e:
             _fail("webhook alert", e, logging.WARNING)
 
@@ -658,6 +687,7 @@ def send_alert(event: str, message: str) -> bool:
             else:
                 log.debug("CallMeBot response: %s", _redact(" ".join(r.text.split())[:200]))
                 delivered = True
+                log.info("Alert sent via callmebot: %s", event)
         except Exception as e:
             _fail("callmebot alert", e, logging.WARNING)
 
@@ -672,15 +702,15 @@ def process_alert(state: dict, stale: bool, detail: str, now: float):
     alert = state.setdefault("alert", {"status": "ok"})
     was_stale = alert.get("status") == "stale"
     if stale and not was_stale:
-        event, message = "stale", f"Netatmo station is not sending current data: {detail}"
+        event, message = "stale", f"Stanice Netatmo neposílá aktuální data. {detail}"
     elif not stale and was_stale:
         minutes = (now - alert.get("since", now)) / 60
-        event, message = "recovered", ("Netatmo station is sending current data again "
-                                       f"(outage lasted {int(minutes // 60)} h {int(minutes % 60)} min).")
+        event, message = "recovered", ("Stanice Netatmo opět posílá aktuální data "
+                                       f"(výpadek trval {int(minutes // 60)} h {int(minutes % 60)} min).")
     elif (stale and ALERT_REPEAT_HOURS > 0
           and now - alert.get("last_alert", now) >= ALERT_REPEAT_HOURS * 3600):
         hours = (now - alert.get("since", now)) / 3600
-        event, message = "reminder", f"Netatmo station has been stale for {hours:.1f} h: {detail}"
+        event, message = "reminder", f"Stanice Netatmo neposílá aktuální data už {hours:.1f} h. {detail}"
     else:
         return
     if not send_alert(event, message):
@@ -820,7 +850,7 @@ def _iteration() -> bool:
             values["netatmo_station_last_update"] = _local_dt(min(tss))
         try:
             process_alert(state, station_stale,
-                          describe_stale("station", station_infos, len(stale_by_source["station"])), now)
+                          describe_stale_cs(station_infos, len(stale_by_source["station"])), now)
         except Exception as e:
             _fail("alert processing", e)
 
