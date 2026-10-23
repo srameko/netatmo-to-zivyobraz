@@ -649,10 +649,15 @@ def send_alert(event: str, message: str) -> bool:
         configured = True
         try:
             # CallMeBot only takes GET; apikey is in the query, so the URL is never logged
-            http_request("get", "https://api.callmebot.com/whatsapp.php", log_url="callmebot",
-                         params={"phone": CALLMEBOT_PHONE, "text": f"{title}\n{message}",
-                                 "apikey": CALLMEBOT_APIKEY})
-            delivered = True
+            r = http_request("get", "https://api.callmebot.com/whatsapp.php", log_url="callmebot",
+                             params={"phone": CALLMEBOT_PHONE, "text": f"{title}\n{message}",
+                                     "apikey": CALLMEBOT_APIKEY})
+            # CallMeBot answers HTTP 200 even when it refuses the message
+            if "paused" in r.text.lower():
+                log.error("CallMeBot alert not delivered: account is Paused (re-activate the API key)")
+            else:
+                log.debug("CallMeBot response: %s", _redact(" ".join(r.text.split())[:200]))
+                delivered = True
         except Exception as e:
             _fail("callmebot alert", e, logging.WARNING)
 
@@ -669,7 +674,9 @@ def process_alert(state: dict, stale: bool, detail: str, now: float):
     if stale and not was_stale:
         event, message = "stale", f"Netatmo station is not sending current data: {detail}"
     elif not stale and was_stale:
-        event, message = "recovered", "Netatmo station is sending current data again."
+        minutes = (now - alert.get("since", now)) / 60
+        event, message = "recovered", ("Netatmo station is sending current data again "
+                                       f"(outage lasted {int(minutes // 60)} h {int(minutes % 60)} min).")
     elif (stale and ALERT_REPEAT_HOURS > 0
           and now - alert.get("last_alert", now) >= ALERT_REPEAT_HOURS * 3600):
         hours = (now - alert.get("since", now)) / 3600
@@ -804,6 +811,10 @@ def _iteration() -> bool:
     if station_infos is not None:
         station_stale = any(i["stale"] for i in station_infos.values())
         values["netatmo_station_stale"] = int(station_stale)
+        bad = sorted(f"{i['name']}({i['reason']})" for i in station_infos.values() if i["stale"])
+        oldest = max((i["age"] for i in station_infos.values() if i["age"] is not None), default=None)
+        log.info("Station: %s, oldest data age %s min%s", "STALE" if station_stale else "OK",
+                 "?" if oldest is None else f"{oldest:.0f}", f", problems: {', '.join(bad)}" if bad else "")
         tss = [i["ts"] for i in station_infos.values() if i["ts"] is not None]
         if tss:
             values["netatmo_station_last_update"] = _local_dt(min(tss))
