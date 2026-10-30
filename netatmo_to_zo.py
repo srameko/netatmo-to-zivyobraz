@@ -6,9 +6,11 @@ to Zivy obraz as custom values. Intended to run every 15 minutes.
 """
 
 import copy
+import html
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -81,6 +83,10 @@ ALERT_WEBHOOK_URL = _secret("ALERT_WEBHOOK_URL", "")
 CALLMEBOT_PHONE   = _secret("CALLMEBOT_PHONE", "")    # WhatsApp via callmebot.com, e.g. +420123456789
 CALLMEBOT_APIKEY  = _secret("CALLMEBOT_APIKEY", "")
 
+# Netatmo's public status page (JSON behind health.netatmo.com). "" disables the lookup.
+STATUS_API      = os.environ.get("NETATMO_STATUS_API", "https://health.netatmo.com/api").rstrip("/")
+STATUS_SERVICES = re.compile(r"weather|homecoach|3rd party|cloud", re.I)
+
 HTTP_TIMEOUT      = (5, 15)   # (connect, read) seconds
 PUSH_TIMEOUT      = (5, 20)
 RETRY_DELAYS      = (5, 15, 30)  # seconds before retry 1..3
@@ -132,24 +138,25 @@ def _retryable(exc: Exception) -> bool:
     return isinstance(exc, (requests.ConnectionError, requests.Timeout))
 
 
-def http_request(method: str, url: str, *, log_url: str | None = None, **kwargs):
+def http_request(method: str, url: str, *, log_url: str | None = None, retry: bool = True, **kwargs):
     """requests.<method> with a default timeout and retries (5xx, 429, network errors).
 
     4xx other than 429 is raised at once. The raised exception carries `log_url`
     (the URL without query string) for logging.
     """
     kwargs.setdefault("timeout", HTTP_TIMEOUT)
-    for attempt in range(len(RETRY_DELAYS) + 1):
+    delays = RETRY_DELAYS if retry else ()
+    for attempt in range(len(delays) + 1):
         try:
             r = getattr(requests, method)(url, **kwargs)
             r.raise_for_status()
             return r
         except requests.RequestException as e:
             e.log_url = log_url or _safe_url(url)
-            if not _retryable(e) or attempt == len(RETRY_DELAYS):
+            if not _retryable(e) or attempt == len(delays):
                 raise
-            delay = RETRY_DELAYS[attempt]
-            log.warning("Retry %d/%d in %ds after %s", attempt + 1, len(RETRY_DELAYS), delay, _describe(e))
+            delay = delays[attempt]
+            log.warning("Retry %d/%d in %ds after %s", attempt + 1, len(delays), delay, _describe(e))
             if _stop.wait(delay):  # shutting down - stop retrying
                 raise
 
@@ -641,6 +648,35 @@ def apply_stale(values: dict, stale_keys: set) -> int:
     return len(stale_keys)
 
 
+def fetch_netatmo_incident() -> str | None:
+    """Active Netatmo incident touching weather/cloud/API services, from their status page. Never raises."""
+    if not STATUS_API:
+        return None
+    try:
+        def get(path, **params):
+            return http_request("get", f"{STATUS_API}/{path}", params=params, timeout=(3, 8), retry=False).json()
+
+        posts = get("posts", is_featured="true", limit=50)["posts"]
+        if not posts:
+            return None
+        names = {s["id"]: s["name"] for s in get("services")["services"]}
+        statuses = {e["id"]: e["name"] for e in get("post_enums")["post_enums"]
+                    if e.get("post_enum_type") == "status"}
+        for post in posts:
+            update = post.get("latest_update") or {}
+            status = statuses.get(update.get("status_id"), "?")
+            if post.get("post_type") != "incident" or status == "resolved":
+                continue
+            hit = sorted({names[i["service_id"]] for i in update.get("impacts", [])
+                          if names.get(i["service_id"]) and STATUS_SERVICES.search(names[i["service_id"]])})
+            if hit:
+                text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", update.get("message", ""))).split())
+                return f"{post.get('title', 'incident')} [{status}; {', '.join(hit)}] {text[:220]}".strip()
+    except Exception as e:
+        log.debug("Netatmo status page lookup failed: %s", _describe(e))
+    return None
+
+
 # ── persistent state (/data) ──────────────────────────────────────────────────
 
 def load_state() -> dict:
@@ -871,9 +907,16 @@ def _iteration() -> bool:
         tss = [i["ts"] for i in station_infos.values() if i["ts"] is not None]
         if tss:
             values["netatmo_station_last_update"] = _local_dt(min(tss))
+        detail = describe_stale_cs(station_infos, len(stale_by_source["station"]))
+        if station_stale:
+            incident = fetch_netatmo_incident()
+            if incident:
+                log.warning("Netatmo status page reports: %s", incident)
+                detail += f" Netatmo na stavové stránce hlásí problém: {incident}"
+            else:
+                log.info("Netatmo status page: no active weather/cloud incident")
         try:
-            process_alert(state, station_stale,
-                          describe_stale_cs(station_infos, len(stale_by_source["station"])), now)
+            process_alert(state, station_stale, detail, now)
         except Exception as e:
             _fail("alert processing", e)
 

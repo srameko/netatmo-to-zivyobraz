@@ -769,6 +769,49 @@ class TestRawStationDump:
         assert ntz.describe_raw_station({}, NOW) == "no devices in response"
 
 
+class TestNetatmoStatusPage:
+    SERVICES = {"services": [{"id": "S1", "name": "Application Weather"}, {"id": "S2", "name": "Mobile applications"}]}
+    ENUMS = {"post_enums": [{"id": "ST1", "name": "investigating", "post_enum_type": "status"},
+                            {"id": "ST2", "name": "resolved", "post_enum_type": "status"}]}
+
+    def _post(self, status="ST1", service="S1", ptype="incident"):
+        return {"posts": [{"title": "Server issues", "post_type": ptype, "latest_update": {
+            "status_id": status, "impacts": [{"service_id": service}],
+            "message": "<p>Weather stations are gradually coming back &amp; online.</p>"}}]}
+
+    def _run(self, posts):
+        def fake(url, **kw):
+            data = {"posts": posts, "services": self.SERVICES, "post_enums": self.ENUMS}[url.rsplit("/", 1)[1]]
+            return _mock_response(data)
+        with patch("requests.get", side_effect=fake):
+            return ntz.fetch_netatmo_incident()
+
+    def test_active_weather_incident_is_reported(self):
+        out = self._run(self._post())
+        assert "Server issues" in out and "Application Weather" in out and "investigating" in out
+        assert "coming back & online" in out and "<p>" not in out
+
+    def test_resolved_or_unrelated_is_ignored(self):
+        assert self._run(self._post(status="ST2")) is None
+        assert self._run(self._post(service="S2")) is None
+
+    def test_no_posts(self):
+        def fake(url, **kw):
+            return _mock_response({"posts": []})
+        with patch("requests.get", side_effect=fake):
+            assert ntz.fetch_netatmo_incident() is None
+
+    def test_failure_never_raises_and_does_not_retry(self):
+        with patch("requests.get", side_effect=requests.ConnectionError()) as g:
+            assert ntz.fetch_netatmo_incident() is None
+        assert g.call_count == 1
+
+    def test_disabled(self):
+        with patch.object(ntz, "STATUS_API", ""), patch("requests.get") as g:
+            assert ntz.fetch_netatmo_incident() is None
+        g.assert_not_called()
+
+
 class TestCzechAlerts:
     def test_czech_local_time_message(self):
         _, stale, infos = _eval(_station(outdoor_age_min=190))

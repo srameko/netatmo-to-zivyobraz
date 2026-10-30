@@ -91,6 +91,7 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 | `NTFY_URL`, `NTFY_TOPIC`|          | ntfy alerts (`NTFY_TOKEN` optional bearer token)       |
 | `CALLMEBOT_PHONE`, `CALLMEBOT_APIKEY` |  | WhatsApp alerts via callmebot.com                 |
 | `ALERT_WEBHOOK_URL`     |          | Generic webhook, receives JSON `{event,title,message}` |
+| `NETATMO_STATUS_API`    |          | Netatmo status page API (default `https://health.netatmo.com/api`, empty = off); when the station is stale, an active Weather/Cloud incident is added to the alert and log |
 | `LOG_LEVEL`             |          | `INFO` (default); `DEBUG` adds tracebacks              |
 | `STATE_FILE`            |          | Alert/freshness state (default `/data/state.json`)     |
 | `HEARTBEAT_FILE`        |          | Written after each successful push (default `/tmp/heartbeat`) |
