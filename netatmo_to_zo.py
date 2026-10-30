@@ -603,6 +603,28 @@ def describe_stale_cs(infos: dict, n_values: int) -> str:
     return "; ".join(parts) + f". Dotčených hodnot: {n_values}."
 
 
+def describe_raw_station(data: dict, now: float) -> str:
+    """Compact, secret-free dump of what the API says about each station module (for diagnosing outages)."""
+    def age(ts):
+        return "?" if not isinstance(ts, (int, float)) else f"{(now - ts) / 60:.0f}min"
+
+    parts = []
+
+    def node(n):
+        dash = n.get("dashboard_data")
+        parts.append(
+            f"{n.get('type', '?')}[reachable={n.get('reachable')} wifi={n.get('wifi_status')} "
+            f"rf={n.get('rf_status')} battery={n.get('battery_percent')} last_seen={age(n.get('last_seen'))} "
+            f"last_store={age(n.get('last_status_store'))} "
+            f"dashboard={age(dash.get('time_utc')) if dash else 'none'}]")
+
+    for device in data.get("body", {}).get("devices", []):
+        node(device)
+        for module in device.get("modules", []):
+            node(module)
+    return " ".join(parts) if parts else "no devices in response"
+
+
 def describe_ages(infos: dict) -> str:
     return " ".join(
         f"{i['name']}={'?' if i['age'] is None else format(i['age'], '.0f')}min{'(stale)' if i['stale'] else ''}"
@@ -783,6 +805,7 @@ def _iteration() -> bool:
     st_last = {k.split(":", 1)[1]: v for k, v in last_ts.items() if k.startswith("station:")}
     station_infos = None
     if station_data is not None:
+        log.info("Station raw: %s", describe_raw_station(station_data, now))
         state.setdefault("last_ok", {})["station"] = now
         v, k, station_infos = evaluate_station(station_data, now, known_modules, st_last)
     elif _down_too_long(state, "station", now):

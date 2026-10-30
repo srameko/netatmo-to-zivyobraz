@@ -754,6 +754,21 @@ class TestCallmebot:
         assert "key123456" not in caplog.text and "+420111222333" not in caplog.text
 
 
+class TestRawStationDump:
+    def test_lists_flags_without_identifiers(self):
+        data = _station(outdoor_dash=False)
+        dev = data["body"]["devices"][0]
+        dev.update(_id="70:ee:50:00:00:01", station_name="Domov", wifi_status=77, last_status_store=NOW - 600)
+        dev["modules"][0].update(_id="02:00:00:00:00:02", rf_status=70, battery_percent=55)
+        out = ntz.describe_raw_station(data, NOW)
+        assert "NAMain[reachable=True wifi=77" in out and "last_store=10min" in out
+        assert "NAModule1[reachable=True" in out and "battery=55" in out and "dashboard=none" in out
+        assert "70:ee" not in out and "Domov" not in out
+
+    def test_empty_response(self):
+        assert ntz.describe_raw_station({}, NOW) == "no devices in response"
+
+
 class TestCzechAlerts:
     def test_czech_local_time_message(self):
         _, stale, infos = _eval(_station(outdoor_age_min=190))
