@@ -436,7 +436,7 @@ class TestBusyBar:
         e = self._by_id(frame)
         assert set(e) == {"bg", "pic", "big", "s1", "s2"}
         assert e["big"]["text"] == "-3.2" and e["s1"]["text"] == "C" and e["s2"]["text"] == "81%"
-        assert e["pic"]["data"].startswith("! XPM2\n5 10 2 1\n") and "#60A5FA" in e["pic"]["data"]  # thermometer, < 5 C
+        assert e["pic"]["data"].startswith("! XPM2\n9 9 2 1\n")                  # snowflake: below zero
         assert all(x["display"] == "front" for x in frame["elements"])
         assert all(x["text"].isascii() for x in frame["elements"] if x["type"] == "text")
 
@@ -453,16 +453,22 @@ class TestBusyBar:
         assert e["pic"]["x"] + 9 + 3 <= e["big"]["x"]
 
     def test_frames_use_a_relative_timeout(self):
-        # the Bar's clock is not ours: no absolute display_until
+        # the Bar's clock is not ours: no absolute display_until; the timeout only covers a dead container
         frames = self._frames(netatmo_pracovna_co2=1300)
         assert len(frames) == 2
         for frame in frames:
-            assert all(x["timeout"] == max(3 * ntz.BUSYBAR_ROTATE_SEC, 30) for x in frame["elements"])
+            assert all(x["timeout"] == 2 * ntz.BUSYBAR_ROTATE_SEC + 5 for x in frame["elements"])
             assert all("display_until" not in x for x in frame["elements"])
 
-    def test_lone_screen_lives_longer_between_redraws(self):
-        (frame,) = self._frames()
-        assert all(x["timeout"] == ntz._STATIC_TTL for x in frame["elements"])
+    @pytest.mark.parametrize("temp,color", [(4.9, "#60A5FA"), (5.0, "#E5E5E5"), (26.9, "#E5E5E5"), (27.0, "#F87171")])
+    def test_thermometer_is_coloured_by_temperature(self, temp, color):
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": temp})[0])
+        assert e["pic"]["data"].startswith("! XPM2\n5 10 2 1\n") and color in e["pic"]["data"]
+
+    @pytest.mark.parametrize("temp,frost", [(-0.1, True), (0.0, False), (-0.04, False), ("--", False)])
+    def test_frost_icon_only_below_zero(self, temp, frost):
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": temp})[0])
+        assert e["pic"]["data"].startswith("! XPM2\n9 9 2 1\n") is frost
 
     def test_rain_swaps_the_icon(self):
         e = self._by_id(self._frames(netatmo_rain_current=0.4)[0])
@@ -581,18 +587,6 @@ class TestBusyBar:
 
     # ── rotation ──────────────────────────────────────────────────────────────
 
-    def test_rotator_alternates_screens_and_skips_old_data(self):
-        values = {**self.VALUES, "netatmo_pracovna_co2": 1300}
-        rot = ntz._BusyBarRotator()
-        rot._values, rot._stamp = values, 1000.0
-        with patch.object(ntz, "push_to_busybar", return_value=True) as push:
-            assert rot.tick(1001) and rot.tick(1009) and rot.tick(1017)
-            texts = [next(e for e in c.args[0]["elements"] if e["id"] == "big")["text"] for c in push.call_args_list]
-            assert texts == ["-3.2", "Vetrejte!", "-3.2"]
-            push.reset_mock()
-            assert rot.tick(1000 + ntz.STALE_AFTER_MIN * 60 + 1) is False   # stale: leave the Bar to expire
-        push.assert_not_called()
-
     def test_measurement_expiry_only_for_fresh_modules(self):
         station = {"NAModule1": {"name": "outdoor", "stale": False, "ts": 1000.0},
                    "NAMain": {"name": "indoor", "stale": True, "ts": 900.0}}
@@ -603,42 +597,107 @@ class TestBusyBar:
         assert e["netatmo_pracovna_co2"] == 2000 + limit
         assert "netatmo_indoor_co2" not in e      # already blanked when fetched
 
-    def test_rotator_shows_an_aged_reading_as_stale(self):
-        rot = ntz._BusyBarRotator()
-        rot._values, rot._stamp = {"netatmo_outdoor_temp": 5.0}, 1000.0
-        rot._expiry = {"netatmo_outdoor_temp": 1100.0}
-        with patch.object(ntz, "STALE_VALUE", "--"), \
-             patch.object(ntz, "push_to_busybar", return_value=True) as push:
-            rot.tick(1099)
-            rot.tick(1101)
-        texts = [next(e for e in c.args[0]["elements"] if e["id"] == "big")["text"] for c in push.call_args_list]
-        assert texts == ["5.0", "--"]
+    # ── glances ───────────────────────────────────────────────────────────────
 
-    def test_lone_screen_is_not_redrawn_while_unchanged(self):
+    @staticmethod
+    def _texts(push):
+        return [next(e for e in c.args[0]["elements"] if e["id"] == "big")["text"] for c in push.call_args_list]
+
+    @staticmethod
+    def _rotator(values, stamp=1000.0):
         rot = ntz._BusyBarRotator()
-        rot._values, rot._stamp = {"netatmo_outdoor_temp": 5.0}, 1000.0
-        with patch.object(ntz, "push_to_busybar", return_value=True) as push:
-            assert rot.tick(1001) and rot.tick(1009) and rot.tick(1017)
+        rot._values, rot._stamp = values, stamp
+        return rot
+
+    def test_a_glance_shows_each_screen_then_clears_the_display(self):
+        rot = self._rotator({**self.VALUES, "netatmo_pracovna_co2": 1300})
+        with patch.object(ntz, "push_to_busybar", return_value=True) as push, \
+             patch.object(ntz, "clear_busybar") as clear:
+            assert rot.tick(1001) and rot.tick(1009)      # weather, then airing
+            assert self._texts(push) == ["-3.2", "Vetrejte!"]
+            clear.assert_not_called()
+            assert rot.tick(1017)                          # the glance is over
+            clear.assert_called_once()
+            assert rot.tick(1025) is False and push.call_count == 2   # idle: no request at all
+
+    def test_next_glance_comes_after_the_glance_period(self):
+        rot = self._rotator({"netatmo_outdoor_temp": 5.0})
+        with patch.object(ntz, "push_to_busybar", return_value=True) as push, patch.object(ntz, "clear_busybar"):
+            rot.tick(1001); rot.tick(1009)                  # one glance: a single screen, then clear
+            for t in (1100, 1500, 1001 + ntz.BUSYBAR_GLANCE_MIN * 60 - 1):
+                assert rot.tick(t) is False
             assert push.call_count == 1
-            assert rot.tick(1001 + ntz._STATIC_TTL / 2 + 1)         # the first one is about to expire
+            assert rot.tick(1001 + ntz.BUSYBAR_GLANCE_MIN * 60)
             assert push.call_count == 2
-            rot._values = {"netatmo_outdoor_temp": 6.0}             # new reading: drawn at once
-            assert rot.tick(1100) and push.call_count == 3
 
-    def test_failed_draw_is_retried_on_the_next_tick(self):
+    def test_rain_or_airing_starting_triggers_a_glance_at_once(self):
         rot = ntz._BusyBarRotator()
-        rot._values, rot._stamp = {"netatmo_outdoor_temp": 5.0}, 1000.0
-        with patch.object(ntz, "push_to_busybar", return_value=False) as push:
-            rot.tick(1001)
-            rot.tick(1009)
-        assert push.call_count == 2
-
-    def test_once_mode_draws_synchronously_without_a_thread(self):
-        rot = ntz._BusyBarRotator(background=False)
         with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
+             patch.object(ntz, "push_to_busybar", return_value=True) as push, patch.object(ntz, "clear_busybar"):
+            rot.update({**self.VALUES}, now=1000.0)
+            rot._thread = object()                           # no real thread in the test
+            rot.tick(1001); rot.tick(1009)                  # the first glance, then idle
+            assert rot.tick(1100) is False
+            rot.update({**self.VALUES, "netatmo_rain_current": 0.5}, now=1100.0)   # it starts to rain
+            assert rot.tick(1101) and push.call_count == 2
+            rot.tick(1109)
+            rot.update({**self.VALUES, "netatmo_rain_current": 0.7}, now=1200.0)   # still raining: nothing new
+            assert rot.tick(1201) is False
+            rot.update({**self.VALUES, "netatmo_pracovna_co2": 1300}, now=1300.0)  # a room needs airing
+            assert rot.tick(1301)
+
+    def test_busy_bar_aborts_the_glance_and_is_tried_again_in_a_minute(self):
+        rot = self._rotator({"netatmo_outdoor_temp": 5.0})
+        with patch.object(ntz, "push_to_busybar", return_value=False) as push:
+            assert rot.tick(1001) is False
+            assert rot.tick(1030) is False and push.call_count == 1
+            assert rot.tick(1062) is False and push.call_count == 2
+
+    def test_a_glance_aborted_midway_clears_what_was_drawn(self):
+        rot = self._rotator({**self.VALUES, "netatmo_pracovna_co2": 1300})
+        with patch.object(ntz, "push_to_busybar", side_effect=[True, False]), \
+             patch.object(ntz, "clear_busybar") as clear:
+            assert rot.tick(1001)
+            assert rot.tick(1009) is False
+        clear.assert_called_once()
+        assert not rot._showing and rot._queue == []
+
+    def test_old_data_is_never_shown(self):
+        rot = self._rotator({"netatmo_outdoor_temp": 5.0}, stamp=1000.0)
+        with patch.object(ntz, "push_to_busybar") as push:
+            assert rot.tick(1000 + ntz.STALE_AFTER_MIN * 60 + 1) is False
+        push.assert_not_called()
+
+    def test_an_aged_reading_is_shown_as_stale(self):
+        rot = self._rotator({"netatmo_outdoor_temp": 5.0})
+        rot._expiry = {"netatmo_outdoor_temp": 1100.0}
+        with patch.object(ntz, "STALE_VALUE", "--"), patch.object(ntz, "clear_busybar"), \
              patch.object(ntz, "push_to_busybar", return_value=True) as push:
-            rot.update(self.VALUES)
-        assert push.call_count == 1 and rot._thread is None
+            rot.tick(1099); rot.tick(1107)                  # glance 1: fresh
+            rot._next_glance = 0.0
+            rot.tick(1101); rot.tick(1109)                  # glance 2: past its deadline
+        assert self._texts(push) == ["5.0", "--"]
+
+    def test_once_mode_shows_the_screens_synchronously_without_a_thread(self):
+        rot = ntz._BusyBarRotator(background=False)
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch.object(ntz, "BUSYBAR_ROTATE_SEC", 0), \
+             patch.object(ntz, "push_to_busybar", return_value=True) as push, \
+             patch.object(ntz, "clear_busybar") as clear:
+            rot.update({**self.VALUES, "netatmo_pracovna_co2": 1300})
+        assert self._texts(push) == ["-3.2", "Vetrejte!"] and clear.call_count == 1 and rot._thread is None
+
+    def test_clear_asks_for_this_apps_elements_only(self):
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch.object(ntz, "BUSYBAR_TOKEN", "pw"), \
+             patch("requests.delete", return_value=_mock_response({})) as delete:
+            ntz.clear_busybar()
+        assert delete.call_args[0][0] == "http://bar/api/display/draw"
+        assert delete.call_args[1]["params"] == {"application_name": "netatmo"}
+        assert delete.call_args[1]["headers"]["X-API-Token"] == "pw"
+
+    def test_clear_never_raises(self):
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
+             patch("requests.delete", side_effect=requests.ConnectionError("down")):
+            ntz.clear_busybar()
 
     def test_main_once_switches_the_bar_to_synchronous_drawing(self):
         with patch.object(ntz, "run_once", return_value=True), \

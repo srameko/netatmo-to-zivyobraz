@@ -95,7 +95,8 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 | `BUSYBAR_URL`           |          | Optional [BUSY Bar](https://docs.busy.app/bar/dev/http-api) output, empty = off. LAN: `http://<ip>/api` (password in `BUSYBAR_TOKEN`, sent as `X-API-Token`); cloud: `https://api.busy.app/busybar` (BUSY API token, sent as Bearer) |
 | `BUSYBAR_TOKEN`         |          | LAN password / cloud API token for the BUSY Bar (also as Docker Swarm secret) |
 | `BUSYBAR_PRIORITY`      |          | Draw priority 1–100 (default `50`: above built-in apps = 10, below a BUSY/CUSTOM session = 90; a `409` is logged and skipped) |
-| `BUSYBAR_ROTATE_SEC`    |          | Seconds each BUSY Bar screen stays (default `8`)       |
+| `BUSYBAR_ROTATE_SEC`    |          | Seconds each BUSY Bar screen is shown during a glance (default `8`) |
+| `BUSYBAR_GLANCE_MIN`    |          | Minutes between BUSY Bar glances (default `16`); rain or airing starting triggers one at once |
 | `LOG_LEVEL`             |          | `INFO` (default); `DEBUG` adds tracebacks              |
 | `STATE_FILE`            |          | Alert/freshness state (default `/data/state.json`)     |
 | `HEARTBEAT_FILE`        |          | Written after each successful push (default `/tmp/heartbeat`) |
@@ -109,16 +110,21 @@ With `BUSYBAR_URL` set, each cycle also draws the front screen (72×16 px, ASCII
 - **airing** — only while some room is at or above 1000 ppm CO₂ (the weather station's own module and every Home
   Coach): a window icon, `Vetrejte!` (the Bar's fonts are ASCII only, so no diacritics) and the rooms, worst first (`pracovna 1300, uvnitr 1050`, scrolls when long).
 
-While there is something to rotate the container redraws the Bar every `BUSYBAR_ROTATE_SEC` (default 8) seconds and
-alternates the screens; a lone weather screen is only redrawn when it changes and about once a minute otherwise.
+The Bar is **not** drawn on all the time, so the app that normally runs on it (e.g. the clock) stays visible. The
+container shows a *glance* — each screen for `BUSYBAR_ROTATE_SEC` seconds, then it clears its own elements — when the
+first readings arrive, every `BUSYBAR_GLANCE_MIN` minutes (default 16) and **at once when it starts to rain or a room
+starts to need airing**. While it keeps raining or the air stays bad nothing new is triggered, only the regular
+glances. Between glances there are no requests at all. A busy (409) or unreachable Bar is tried again a minute later
+and logged once per change.
+
 Both screens start with a black background that hides what another app left on the display (the draw API only adds
 elements, it never clears other apps'). Elements carry a relative `timeout` (the Bar's own clock is never compared
-with the container's), so a stopped container leaves the Bar clean within seconds. Every reading is shown as stale
-(`STALE_VALUE`) once it is `STALE_AFTER_MIN` old, and nothing is redrawn when no fresh data has arrived for that
-long. A failing or busy Bar (409) is logged once per change and never affects the Živý obraz push or the heartbeat;
-the Bar gets the readings even when the Živý obraz push fails. With `--once` the screen is drawn before the process
-exits (no background thread). At startup a missing `BUSYBAR_TOKEN` is warned about; `BUSYBAR_PRIORITY` is clamped to
-1–100 and `BUSYBAR_ROTATE_SEC` to at least 1.
+with the container's) as a safety net, so a container that dies midway leaves the Bar clean within seconds. Every
+reading is shown as stale (`STALE_VALUE`) once it is `STALE_AFTER_MIN` old, and nothing is drawn when no fresh data
+has arrived for that long. The Bar gets the readings even when the Živý obraz push fails, and never affects it or the
+heartbeat. With `--once` the glance is shown before the process exits (no background thread). At startup a missing
+`BUSYBAR_TOKEN` is warned about; `BUSYBAR_PRIORITY` is clamped to 1–100, `BUSYBAR_ROTATE_SEC` and `BUSYBAR_GLANCE_MIN`
+to at least 1.
 
 ### Stale data
 
