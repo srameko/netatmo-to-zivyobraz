@@ -593,6 +593,22 @@ class TestBusyBar:
         conn.sock.settimeout.assert_called_with(1.0)          # never wait long for a body
         conn.getresponse.return_value.read.assert_not_called()  # read() would wait for the promised length
 
+    def test_an_error_body_is_kept_when_the_answer_closes_the_connection(self, caplog):
+        # getresponse() sets conn.sock to None for a closing answer; the body is still there to be read
+        cls, conn = self._http(status=403, body=b'{"error":"Forbidden"}')
+        sock = conn.sock = MagicMock()
+        response = conn.getresponse.return_value
+
+        def getresponse():
+            conn.sock = None
+            return response
+        conn.getresponse.side_effect = getresponse
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \
+             caplog.at_level("WARNING"):
+            assert ntz.push_to_busybar(self._frames()[0]) is False
+        sock.settimeout.assert_called_with(1.0)
+        assert any("status=403" in r.message and "Forbidden" in r.message for r in caplog.records)
+
     def test_a_409_without_any_body_is_still_a_409(self):
         cls, _ = self._http(status=409, body_read_raises=TimeoutError("no body"))
         with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \

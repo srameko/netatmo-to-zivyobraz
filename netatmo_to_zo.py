@@ -1070,11 +1070,14 @@ def _bar_call(method: str, path: str, payload: dict | None = None, query: dict |
     conn = connection(u.hostname, u.port, timeout=HTTP_TIMEOUT[1])
     try:
         conn.request(method, target, body=body, headers=headers)
+        # getresponse() sets conn.sock to None for an answer that closes the connection, while the response keeps
+        # reading from it: take the socket now to be able to shorten its timeout for an error body below
+        sock = conn.sock
         response = conn.getresponse()
         if response.status >= 400:
             text = ""
-            if conn.sock is not None:    # what has already arrived, briefly: the Content-Length is not to be trusted
-                conn.sock.settimeout(1.0)
+            if sock is not None:         # what has already arrived, briefly: the Content-Length is not to be trusted
+                sock.settimeout(1.0)
                 try:
                     text = response.read1(512).decode("utf-8", "replace")
                 except (OSError, http.client.HTTPException):
