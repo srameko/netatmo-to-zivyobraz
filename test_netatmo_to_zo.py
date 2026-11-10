@@ -653,6 +653,50 @@ class TestBusyBar:
             assert rot.tick(1030) is False and push.call_count == 1
             assert rot.tick(1062) is False and push.call_count == 2
 
+    def test_failed_glances_back_off_instead_of_retrying_every_minute(self):
+        rot = self._rotator({"netatmo_outdoor_temp": 5.0}, stamp=1000.0)
+        t, gaps = 1001.0, []
+        with patch.object(ntz, "push_to_busybar", return_value=False), patch.object(ntz, "STALE_AFTER_MIN", 10_000):
+            for _ in range(7):
+                rot.tick(t)
+                gaps.append(rot._next_glance - t)
+                t = rot._next_glance
+        # 1, 2, 4, 8 minutes, then never later than a regular glance (16 min)
+        assert gaps == [60, 120, 240, 480, 960, 960, 960]
+
+    def test_a_drawn_glance_ends_the_backoff(self):
+        rot = self._rotator({"netatmo_outdoor_temp": 5.0}, stamp=1000.0)
+        with patch.object(ntz, "push_to_busybar", side_effect=[False, False, True]), patch.object(ntz, "clear_busybar"):
+            rot.tick(1001)
+            rot.tick(rot._next_glance)
+            assert rot._failures == 2
+            assert rot.tick(rot._next_glance)
+        assert rot._failures == 0
+        assert rot._next_glance - 1001 > 60 * 16        # back on the regular schedule
+
+    def test_each_glance_is_logged_with_its_reason(self, caplog):
+        rot = ntz._BusyBarRotator()
+        values = {**self.VALUES, "netatmo_pracovna_co2": 1300}
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), caplog.at_level("INFO"), \
+             patch.object(ntz, "push_to_busybar", return_value=False), patch.object(ntz, "clear_busybar"):
+            rot.update(values, now=1000.0)
+            rot._thread = object()
+            rot.tick(1001)                                  # a room needs airing from the very first readings
+            rot.tick(rot._next_glance)                      # the retry
+        messages = [r.message for r in caplog.records]
+        assert any("glance (airing needed), 2 screen(s)" in m for m in messages)
+        assert any("glance not drawn (1 in a row), next try in 1 min" in m for m in messages)
+        assert any("glance (retry), 2 screen(s)" in m for m in messages)
+
+    def test_a_new_alert_names_itself_as_the_reason(self):
+        rot = ntz._BusyBarRotator()
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"):
+            rot.update(self.VALUES, now=1000.0)
+            rot._thread = object()
+            rot._reason, rot._next_glance = "scheduled", 5000.0
+            rot.update({**self.VALUES, "netatmo_rain_current": 0.4, "netatmo_pracovna_co2": 1300}, now=1100.0)
+        assert rot._reason == "rain started + airing needed" and rot._next_glance == 0.0
+
     def test_a_glance_aborted_midway_clears_what_was_drawn(self):
         rot = self._rotator({**self.VALUES, "netatmo_pracovna_co2": 1300})
         with patch.object(ntz, "push_to_busybar", side_effect=[True, False]), \
@@ -798,6 +842,20 @@ class TestSecret:
              patch("builtins.open", mock_open(read_data="file_wins")), \
              patch.dict(os.environ, {"ANY_KEY": "env_loses"}):
             assert ntz._secret("ANY_KEY") == "file_wins"
+
+
+class TestDescribeCause:
+    def test_names_the_wrapped_exceptions_without_their_text(self):
+        import http.client
+        import urllib3
+        err = requests.ConnectionError(urllib3.exceptions.ProtocolError(
+            "Connection aborted.", http.client.RemoteDisconnected("Remote end closed connection http://x/?key=SECRET")))
+        text = ntz._describe(err)
+        assert "ConnectionError" in text and "cause=ProtocolError>RemoteDisconnected" in text
+        assert "SECRET" not in text
+
+    def test_no_cause_for_a_plain_error(self):
+        assert "cause=" not in ntz._describe(RuntimeError("boom"))
 
 
 class TestIntSetting:
