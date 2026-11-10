@@ -415,6 +415,167 @@ class TestPushToZo:
         mock_get.assert_not_called()
 
 
+# ── BUSY Bar output ───────────────────────────────────────────────────────────
+
+class TestBusyBar:
+    VALUES = {"netatmo_outdoor_temp": -3.24, "netatmo_outdoor_humidity": 81,
+              "netatmo_rain_current": 0, "netatmo_indoor_co2": 640, "netatmo_pracovna_co2": 700}
+
+    @staticmethod
+    def _by_id(frame):
+        return {e["id"]: e for e in frame["elements"]}
+
+    def _frames(self, **extra):
+        return ntz.build_busybar_frames({**self.VALUES, **extra}, now=1000)
+
+    # ── frames ────────────────────────────────────────────────────────────────
+
+    def test_weather_frame(self):
+        (frame,) = self._frames()
+        assert frame["application_name"] == "netatmo"
+        e = self._by_id(frame)
+        assert set(e) == {"bg", "pic", "big", "s1", "s2"}
+        assert e["big"]["text"] == "-3.2" and e["s1"]["text"] == "C" and e["s2"]["text"] == "81%"
+        assert e["pic"]["data"].startswith("! XPM2\n5 10 2 1\n") and "#60A5FA" in e["pic"]["data"]  # thermometer, < 5 C
+        assert all(x["display"] == "front" for x in frame["elements"])
+        assert all(x["text"].isascii() for x in frame["elements"] if x["type"] == "text")
+
+    def test_background_covers_the_display_below_everything(self):
+        e = self._by_id(self._frames()[0])
+        bg = e["bg"]
+        assert (bg["x"], bg["y"], bg["width"], bg["height"]) == (0, 0, 72, 16)
+        assert bg["fill_colors"] == ["#000000FF"]
+        assert all(x["z_index"] > bg["z_index"] for x in e.values() if x is not bg)
+
+    def test_temperature_is_clear_of_the_icon(self):
+        # the rain cloud is the wider icon: x=1..9, so the temperature must start at least 3 px after it
+        e = self._by_id(self._frames(netatmo_rain_current=0.4)[0])
+        assert e["pic"]["x"] + 9 + 3 <= e["big"]["x"]
+
+    def test_frames_expire_on_their_own(self):
+        frame = self._frames()[0]
+        assert all(x["display_until"] == str(1000 + max(3 * ntz.BUSYBAR_ROTATE_SEC, 30)) for x in frame["elements"])
+
+    def test_rain_swaps_the_icon(self):
+        e = self._by_id(self._frames(netatmo_rain_current=0.4)[0])
+        assert e["pic"]["data"].startswith("! XPM2\n9 10 3 1\n")
+
+    def test_no_airing_frame_while_the_air_is_fine(self):
+        assert len(self._frames()) == 1
+
+    def test_airing_frame_lists_rooms_worst_first(self):
+        frames = self._frames(netatmo_indoor_co2=1050, netatmo_pracovna_co2=1300, netatmo_obyvak_co2=700)
+        assert len(frames) == 2
+        e = self._by_id(frames[1])
+        # same ids as the weather frame, so drawing one replaces the other
+        assert set(e) == set(self._by_id(frames[0]))
+        assert e["big"]["text"] == "Vetrejte!" and e["big"]["color"] == "#F87171FF"
+        assert e["s1"]["text"] == "pracovna 1300, uvnitr 1050"
+        assert e["s1"]["width"] == 58 and e["s1"]["scroll_rate"] > 0
+        assert e["pic"]["data"].startswith("! XPM2\n11 12 6 1\n") and "#F87171" in e["pic"]["data"]
+
+    def test_airing_frame_without_outdoor_temperature(self):
+        frames = ntz.build_busybar_frames({"netatmo_pracovna_co2": 1100}, now=0)
+        assert len(frames) == 1 and self._by_id(frames[0])["big"]["text"] == "Vetrejte!"
+
+    def test_stale_co2_is_not_an_airing_alert(self):
+        frames = ntz.build_busybar_frames({"netatmo_outdoor_temp": 5.0, "netatmo_indoor_co2": "--"}, now=0)
+        assert len(frames) == 1
+
+    @pytest.mark.parametrize("co2,color", [(799, "#4ADE80FF"), (800, "#FACC15FF"),
+                                           (1199, "#FACC15FF"), (1200, "#F87171FF")])
+    def test_co2_color_thresholds(self, co2, color):
+        assert ntz._co2_color(co2) == color
+
+    def test_unit_follows_the_reading(self):
+        # "-3.2" = 4 + 7 + 4 + 7 px wide, the unit sits one pixel after it
+        e = self._by_id(self._frames()[0])
+        assert e["s1"]["x"] == e["big"]["x"] + 22 + 1
+
+    def test_wide_reading_keeps_the_unit_clear_of_the_humidity(self):
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": -12.5}, now=0)[0])
+        assert e["s1"]["text"] == "C" and e["s1"]["x"] + 5 <= 50
+
+    def test_stale_temperature_is_shown_as_is_without_a_unit(self):
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": "--"}, now=0)[0])
+        assert e["big"]["text"] == "--" and e["s1"]["text"] == " "
+
+    def test_nothing_to_draw(self):
+        assert ntz.build_busybar_frames({}, now=0) == []
+
+    def test_non_ascii_is_folded(self):
+        assert ntz._ascii("Přijatelný") == "Prijatelny"
+
+    # ── push ──────────────────────────────────────────────────────────────────
+
+    @pytest.fixture(autouse=True)
+    def _fresh_state(self):
+        ntz._bar_state = "unknown"
+
+    def test_disabled_without_url(self):
+        with patch.object(ntz, "BUSYBAR_URL", ""), patch("requests.post") as post:
+            assert ntz.push_to_busybar(self._frames()[0]) is False
+        post.assert_not_called()
+
+    def test_lan_uses_x_api_token(self):
+        with patch.object(ntz, "BUSYBAR_URL", "http://192.168.5.196/api"), \
+             patch.object(ntz, "BUSYBAR_TOKEN", "pw"), \
+             patch("requests.post", return_value=_mock_response({})) as post:
+            assert ntz.push_to_busybar(self._frames()[0]) is True
+        assert post.call_args[0][0] == "http://192.168.5.196/api/display/draw"
+        assert post.call_args[1]["headers"]["X-API-Token"] == "pw"
+        assert "Authorization" not in post.call_args[1]["headers"]
+
+    def test_cloud_uses_bearer(self):
+        with patch.object(ntz, "BUSYBAR_URL", "https://api.busy.app/busybar"), \
+             patch.object(ntz, "BUSYBAR_TOKEN", "tok"), \
+             patch("requests.post", return_value=_mock_response({})) as post:
+            ntz.push_to_busybar(self._frames()[0])
+        assert post.call_args[1]["headers"]["Authorization"] == "Bearer tok"
+
+    def test_409_is_not_an_error(self):
+        resp = MagicMock(status_code=409)
+        bad = MagicMock(raise_for_status=MagicMock(side_effect=requests.HTTPError(response=resp)))
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
+             patch("requests.post", return_value=bad), \
+             patch.object(ntz, "_fail") as fail:
+            assert ntz.push_to_busybar(self._frames()[0]) is False
+        fail.assert_not_called()
+
+    def test_failure_never_raises(self):
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
+             patch("requests.post", side_effect=requests.ConnectionError("down")):
+            assert ntz.push_to_busybar(self._frames()[0]) is False
+
+    def test_outage_is_logged_once(self, caplog):
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
+             patch("requests.post", side_effect=requests.ConnectionError("down")), \
+             caplog.at_level("INFO"):
+            for _ in range(5):
+                ntz.push_to_busybar(self._frames()[0])
+        assert sum("BUSY Bar" in r.message for r in caplog.records) == 1
+
+    # ── rotation ──────────────────────────────────────────────────────────────
+
+    def test_rotator_alternates_screens_and_skips_old_data(self):
+        values = {**self.VALUES, "netatmo_pracovna_co2": 1300}
+        rot = ntz._BusyBarRotator()
+        rot._values, rot._stamp = values, 1000.0
+        with patch.object(ntz, "push_to_busybar", return_value=True) as push:
+            assert rot.tick(1001) and rot.tick(1009) and rot.tick(1017)
+            texts = [next(e for e in c.args[0]["elements"] if e["id"] == "big")["text"] for c in push.call_args_list]
+            assert texts == ["-3.2", "Vetrejte!", "-3.2"]
+            push.reset_mock()
+            assert rot.tick(1000 + ntz.STALE_AFTER_MIN * 60 + 1) is False   # stale: leave the Bar to expire
+        push.assert_not_called()
+
+    def test_rotator_starts_no_thread_when_disabled(self):
+        rot = ntz._BusyBarRotator()
+        with patch.object(ntz, "BUSYBAR_URL", ""):
+            rot.update(self.VALUES)
+        assert rot._thread is None
+
+
 # ── token management ──────────────────────────────────────────────────────────
 
 class TestTokenManagement:

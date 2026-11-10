@@ -92,9 +92,28 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 | `CALLMEBOT_PHONE`, `CALLMEBOT_APIKEY` |  | WhatsApp alerts via callmebot.com                 |
 | `ALERT_WEBHOOK_URL`     |          | Generic webhook, receives JSON `{event,title,message}` |
 | `NETATMO_STATUS_API`    |          | Netatmo status page API (default `https://health.netatmo.com/api`, empty = off); when the station is stale, an active Weather/Cloud incident is added to the alert and log |
+| `BUSYBAR_URL`           |          | Optional [BUSY Bar](https://docs.busy.app/bar/dev/http-api) output, empty = off. LAN: `http://<ip>/api` (password in `BUSYBAR_TOKEN`, sent as `X-API-Token`); cloud: `https://api.busy.app/busybar` (BUSY API token, sent as Bearer) |
+| `BUSYBAR_TOKEN`         |          | LAN password / cloud API token for the BUSY Bar (also as Docker Swarm secret) |
+| `BUSYBAR_PRIORITY`      |          | Draw priority 1–100 (default `50`: above built-in apps = 10, below a BUSY/CUSTOM session = 90; a `409` is logged and skipped) |
+| `BUSYBAR_ROTATE_SEC`    |          | Seconds each BUSY Bar screen stays (default `8`)       |
 | `LOG_LEVEL`             |          | `INFO` (default); `DEBUG` adds tracebacks              |
 | `STATE_FILE`            |          | Alert/freshness state (default `/data/state.json`)     |
 | `HEARTBEAT_FILE`        |          | Written after each successful push (default `/tmp/heartbeat`) |
+
+### BUSY Bar (optional)
+
+With `BUSYBAR_URL` set, each cycle also draws the front screen (72×16 px, ASCII only) via `POST /display/draw`:
+
+- **weather**: an icon (a rain cloud while `netatmo_rain_current` > 0, otherwise a thermometer coloured by the
+  temperature), the outdoor temperature with its unit, and the outdoor humidity on the right;
+- **airing** — only while some room is at or above 1000 ppm CO₂ (the weather station's own module and every Home
+  Coach): a window icon, `Vetrejte!` (the Bar's fonts are ASCII only, so no diacritics) and the rooms, worst first (`pracovna 1300, uvnitr 1050`, scrolls when long).
+
+The container redraws the Bar every `BUSYBAR_ROTATE_SEC` (default 8) seconds and alternates the screens. Both start
+with a black background that hides what another app left on the display (the draw API only adds elements, it never
+clears other apps'). Elements expire a few rotations after the last redraw, and no redraw happens once the data is
+older than `STALE_AFTER_MIN`, so a stopped container or stale data never leaves an old reading on the Bar. A
+failing or busy Bar (409) is logged once per change, and never affects the Živý obraz push or the heartbeat.
 
 ### Stale data
 
