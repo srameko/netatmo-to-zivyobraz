@@ -91,8 +91,8 @@ STATUS_SERVICES = re.compile(r"weather|homecoach|3rd party|cloud", re.I)
 # or https://api.busy.app/busybar (cloud, API token)
 BUSYBAR_URL      = os.environ.get("BUSYBAR_URL", "").rstrip("/")
 BUSYBAR_TOKEN    = _secret("BUSYBAR_TOKEN", "")
-BUSYBAR_PRIORITY = int(os.environ.get("BUSYBAR_PRIORITY", "50"))   # 10 built-in apps, 90 BUSY/CUSTOM session
-BUSYBAR_ROTATE_SEC = int(os.environ.get("BUSYBAR_ROTATE_SEC", "8"))   # seconds each screen stays
+BUSYBAR_PRIORITY = min(100, max(1, int(os.environ.get("BUSYBAR_PRIORITY", "50"))))   # 10 built-in apps, 90 BUSY/CUSTOM session
+BUSYBAR_ROTATE_SEC = max(1, int(os.environ.get("BUSYBAR_ROTATE_SEC", "8")))   # seconds each screen stays
 BUSYBAR_APP      = "netatmo"
 
 HTTP_TIMEOUT      = (5, 15)   # (connect, read) seconds
@@ -860,6 +860,7 @@ _WINDOW_XPM = (
 _ROOM_NAMES = {"indoor": "uvnitr"}   # the station's own module has no HOMECOACH_MAP slug
 _Z_BG, _Z_FG = 1000, 1001            # our frame covers whatever another app left on the display
 _TEMP_X = 14                         # temperature starts here: a few pixels clear of the icon
+_STATIC_TTL = 120                    # a lone screen (nothing to rotate) stays this long without a redraw
 
 
 def _is_number(value) -> bool:
@@ -869,6 +870,11 @@ def _is_number(value) -> bool:
 def _bold_width(text: str) -> int:
     """Pixel width of `text` in the Bar's bold font (digits 7 px, '-' and '.' 4 px)."""
     return sum(7 if c.isdigit() else 4 for c in text)
+
+
+def _hum_width(text: str) -> int:
+    """Pixel width of `text` in the Bar's "normal" font (digits 6 px, "%" 8 px)."""
+    return sum(6 if c.isdigit() else 8 for c in text)
 
 
 def _temp_color(value) -> str:
@@ -893,7 +899,7 @@ def _rooms_to_air(values: dict) -> list[tuple[str, int]]:
     return sorted(rooms, key=lambda r: -r[1])
 
 
-def build_busybar_frames(values: dict, now: float) -> list[dict]:
+def build_busybar_frames(values: dict) -> list[dict]:
     """The screens the front display (72x16) takes turns showing, as ready draw requests.
 
     1. weather: icon (rain cloud while it rains, else a thermometer), the outdoor temperature, its unit and
@@ -902,14 +908,13 @@ def build_busybar_frames(values: dict, now: float) -> list[dict]:
        only while a room needs it.
 
     Both frames use the same element ids, so drawing one replaces the other, and both start with a black
-    background that hides what another app left on the display. Elements expire after a few rotations, so
-    a stopped container leaves the Bar clean. An empty list means there is nothing to show.
+    background that hides what another app left on the display. Elements carry a relative `timeout` (not an
+    absolute time, so the Bar's clock does not matter) and vanish on their own if the container stops. An
+    empty list means there is nothing to show.
     """
-    until = str(int(now) + max(3 * BUSYBAR_ROTATE_SEC, 30))
-
     def el(eid: str, kind: str, x: int, y: int, align: str = "top_left", z: int = _Z_FG, **fields) -> dict:
         return {"id": eid, "type": kind, "x": x, "y": y, "align": align, "z_index": z,
-                "display": "front", "display_until": until, **fields}
+                "display": "front", **fields}
 
     def frame(*elements: dict) -> dict:
         bg = el("bg", "rectangle", 0, 0, z=_Z_BG, width=72, height=16, fill="solid",
@@ -919,15 +924,18 @@ def build_busybar_frames(values: dict, now: float) -> list[dict]:
     frames = []
     temp_val = values.get("netatmo_outdoor_temp")
     temp = _bar_text(temp_val, "{:.1f}")
+    if temp == "-0.0":
+        temp = "0.0"
     if temp:
         raining = _is_number(values.get("netatmo_rain_current")) and values["netatmo_rain_current"] > 0
         pic = (el("pic", "xpmbitmap", 1, 3, data=_RAIN_XPM) if raining else
                el("pic", "xpmbitmap", 3, 3, data=_THERMOMETER_XPM.format(color=_temp_color(temp_val))))
+        hum = _bar_text(values.get("netatmo_outdoor_humidity"), "{:.0f}%")
+        room_until = 72 - _hum_width(hum) - 2 if hum else 72      # the unit must not touch the humidity
         unit_x = _TEMP_X + _bold_width(temp) + 1
         unit = (el("s1", "text", unit_x, 3, text="C", font="small", color="#A0A0A0FF")
-                if _is_number(temp_val) and unit_x + 5 <= 50 else
+                if _is_number(temp_val) and unit_x + 5 <= room_until else
                 el("s1", "text", _TEMP_X, 3, text=" ", font="small"))
-        hum = _bar_text(values.get("netatmo_outdoor_humidity"), "{:.0f}%")
         hum_el = (el("s2", "text", 72, 8, "mid_right", text=hum, font="normal", color="#60A5FAFF") if hum else
                   el("s2", "text", _TEMP_X, 3, text=" ", font="small"))
         frames.append(frame(pic, el("big", "text", _TEMP_X, 3, text=temp, font="bold", color="#FFFFFFFF"), unit, hum_el))
@@ -943,6 +951,11 @@ def build_busybar_frames(values: dict, now: float) -> list[dict]:
                scroll_rate=1500, scroll_start_delay=1500, scroll_repeat_delay=2500),
             el("s2", "text", 14, 8, text=" ", font="small"),
         ))
+    # every frame is redrawn every len(frames) * BUSYBAR_ROTATE_SEC; a lone one much less often
+    ttl = max(3 * BUSYBAR_ROTATE_SEC, 30) if len(frames) > 1 else _STATIC_TTL
+    for f in frames:
+        for e in f["elements"]:
+            e["timeout"] = ttl
     return frames
 
 
@@ -984,8 +997,11 @@ def push_to_busybar(payload: dict) -> bool:
 class _BusyBarRotator:
     """Redraws the Bar every BUSYBAR_ROTATE_SEC, one screen after another, from the latest values."""
 
-    def __init__(self):
+    def __init__(self, background: bool = True):
+        self.background = background     # False (--once): draw right in update(), no thread outliving the run
         self._lock = threading.Lock()
+        self._last_frame: dict | None = None
+        self._last_push = 0.0
         self._values: dict | None = None
         self._expiry: dict[str, float] = {}
         self._stamp = 0.0
@@ -1000,9 +1016,11 @@ class _BusyBarRotator:
             self._values = dict(values)
             self._expiry = dict(expiry or {})
             self._stamp = time.time() if now is None else now
-            if self._thread is None:
+            if self.background and self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="busybar", daemon=True)
                 self._thread.start()
+        if not self.background:
+            self.tick(time.time())
 
     def tick(self, now: float) -> bool:
         """One redraw. Readings past their deadline are shown as stale (like the Zivy obraz push does); no data
@@ -1015,12 +1033,17 @@ class _BusyBarRotator:
         if aged:
             values = dict(values)
             apply_stale(values, aged)
-        frames = build_busybar_frames(values, now)
+        frames = build_busybar_frames(values)
         if not frames:
             return False
         frame = frames[self._step % len(frames)]
         self._step += 1
-        return push_to_busybar(frame)
+        if len(frames) == 1 and frame == self._last_frame and now - self._last_push < _STATIC_TTL / 2:
+            return True     # nothing to rotate and the same picture is still on the Bar: no request
+        ok = push_to_busybar(frame)
+        if ok:
+            self._last_frame, self._last_push = frame, now
+        return ok
 
     def _run(self) -> None:
         while not _stop.is_set():
@@ -1194,11 +1217,22 @@ def _on_signal(signum, frame):
     _stop.set()  # no logging here: it could deadlock on the logging lock
 
 
+def check_busybar_config() -> None:
+    """Say so at startup when the Bar output is on but cannot work (it would only fail quietly every cycle)."""
+    if BUSYBAR_URL and not BUSYBAR_TOKEN:
+        log.warning("BUSY Bar: BUSYBAR_URL is set but BUSYBAR_TOKEN is empty, every draw will be refused")
+    elif BUSYBAR_URL:
+        log.info("BUSY Bar output on: %s, priority %d, screens change every %d s",
+                 _safe_url(BUSYBAR_URL), BUSYBAR_PRIORITY, BUSYBAR_ROTATE_SEC)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+    check_busybar_config()
     if "--once" in argv:
+        busybar.background = False      # a daemon thread would die with the process before it drew anything
         return 0 if run_once() else 1
     log.info("Starting, interval %d s, stale after %d min", INTERVAL_SEC, STALE_AFTER_MIN)
     while not _stop.is_set():

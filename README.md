@@ -109,11 +109,16 @@ With `BUSYBAR_URL` set, each cycle also draws the front screen (72×16 px, ASCII
 - **airing** — only while some room is at or above 1000 ppm CO₂ (the weather station's own module and every Home
   Coach): a window icon, `Vetrejte!` (the Bar's fonts are ASCII only, so no diacritics) and the rooms, worst first (`pracovna 1300, uvnitr 1050`, scrolls when long).
 
-The container redraws the Bar every `BUSYBAR_ROTATE_SEC` (default 8) seconds and alternates the screens. Both start
-with a black background that hides what another app left on the display (the draw API only adds elements, it never
-clears other apps'). Elements expire a few rotations after the last redraw, and no redraw happens once the data is
-older than `STALE_AFTER_MIN`, so a stopped container or stale data never leaves an old reading on the Bar. A
-failing or busy Bar (409) is logged once per change, and never affects the Živý obraz push or the heartbeat.
+While there is something to rotate the container redraws the Bar every `BUSYBAR_ROTATE_SEC` (default 8) seconds and
+alternates the screens; a lone weather screen is only redrawn when it changes and about once a minute otherwise.
+Both screens start with a black background that hides what another app left on the display (the draw API only adds
+elements, it never clears other apps'). Elements carry a relative `timeout` (the Bar's own clock is never compared
+with the container's), so a stopped container leaves the Bar clean within seconds. Every reading is shown as stale
+(`STALE_VALUE`) once it is `STALE_AFTER_MIN` old, and nothing is redrawn when no fresh data has arrived for that
+long. A failing or busy Bar (409) is logged once per change and never affects the Živý obraz push or the heartbeat;
+the Bar gets the readings even when the Živý obraz push fails. With `--once` the screen is drawn before the process
+exits (no background thread). At startup a missing `BUSYBAR_TOKEN` is warned about; `BUSYBAR_PRIORITY` is clamped to
+1–100 and `BUSYBAR_ROTATE_SEC` to at least 1.
 
 ### Stale data
 

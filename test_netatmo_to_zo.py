@@ -426,7 +426,7 @@ class TestBusyBar:
         return {e["id"]: e for e in frame["elements"]}
 
     def _frames(self, **extra):
-        return ntz.build_busybar_frames({**self.VALUES, **extra}, now=1000)
+        return ntz.build_busybar_frames({**self.VALUES, **extra})
 
     # ── frames ────────────────────────────────────────────────────────────────
 
@@ -452,9 +452,17 @@ class TestBusyBar:
         e = self._by_id(self._frames(netatmo_rain_current=0.4)[0])
         assert e["pic"]["x"] + 9 + 3 <= e["big"]["x"]
 
-    def test_frames_expire_on_their_own(self):
-        frame = self._frames()[0]
-        assert all(x["display_until"] == str(1000 + max(3 * ntz.BUSYBAR_ROTATE_SEC, 30)) for x in frame["elements"])
+    def test_frames_use_a_relative_timeout(self):
+        # the Bar's clock is not ours: no absolute display_until
+        frames = self._frames(netatmo_pracovna_co2=1300)
+        assert len(frames) == 2
+        for frame in frames:
+            assert all(x["timeout"] == max(3 * ntz.BUSYBAR_ROTATE_SEC, 30) for x in frame["elements"])
+            assert all("display_until" not in x for x in frame["elements"])
+
+    def test_lone_screen_lives_longer_between_redraws(self):
+        (frame,) = self._frames()
+        assert all(x["timeout"] == ntz._STATIC_TTL for x in frame["elements"])
 
     def test_rain_swaps_the_icon(self):
         e = self._by_id(self._frames(netatmo_rain_current=0.4)[0])
@@ -475,11 +483,11 @@ class TestBusyBar:
         assert e["pic"]["data"].startswith("! XPM2\n11 12 6 1\n") and "#F87171" in e["pic"]["data"]
 
     def test_airing_frame_without_outdoor_temperature(self):
-        frames = ntz.build_busybar_frames({"netatmo_pracovna_co2": 1100}, now=0)
+        frames = ntz.build_busybar_frames({"netatmo_pracovna_co2": 1100})
         assert len(frames) == 1 and self._by_id(frames[0])["big"]["text"] == "Vetrejte!"
 
     def test_stale_co2_is_not_an_airing_alert(self):
-        frames = ntz.build_busybar_frames({"netatmo_outdoor_temp": 5.0, "netatmo_indoor_co2": "--"}, now=0)
+        frames = ntz.build_busybar_frames({"netatmo_outdoor_temp": 5.0, "netatmo_indoor_co2": "--"})
         assert len(frames) == 1
 
     @pytest.mark.parametrize("co2,color", [(799, "#4ADE80FF"), (800, "#FACC15FF"),
@@ -492,16 +500,32 @@ class TestBusyBar:
         e = self._by_id(self._frames()[0])
         assert e["s1"]["x"] == e["big"]["x"] + 22 + 1
 
-    def test_wide_reading_keeps_the_unit_clear_of_the_humidity(self):
-        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": -12.5}, now=0)[0])
-        assert e["s1"]["text"] == "C" and e["s1"]["x"] + 5 <= 50
+    @pytest.mark.parametrize("temp,humidity,unit_shown", [
+        (-3.2, 81, True), (-3.2, 100, True),
+        (-12.5, 100, False),     # the unit would end at x=49, the "100%" starts at x=46
+        (21.5, 100, False),
+        (-12.5, None, True),     # no humidity: nothing to keep clear of
+    ])
+    def test_unit_never_touches_the_humidity(self, temp, humidity, unit_shown):
+        values = {"netatmo_outdoor_temp": temp}
+        if humidity is not None:
+            values["netatmo_outdoor_humidity"] = humidity
+        e = self._by_id(ntz.build_busybar_frames(values)[0])
+        assert (e["s1"]["text"] == "C") is unit_shown
+        end = e["s1"]["x"] + 5 if unit_shown else e["big"]["x"] + ntz._bold_width(e["big"]["text"])
+        hum_start = 72 - ntz._hum_width(e["s2"]["text"]) if humidity is not None else 72
+        assert end < hum_start
+
+    def test_tiny_negative_temperature_has_no_minus_sign(self):
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": -0.04})[0])
+        assert e["big"]["text"] == "0.0"
 
     def test_stale_temperature_is_shown_as_is_without_a_unit(self):
-        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": "--"}, now=0)[0])
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": "--"})[0])
         assert e["big"]["text"] == "--" and e["s1"]["text"] == " "
 
     def test_nothing_to_draw(self):
-        assert ntz.build_busybar_frames({}, now=0) == []
+        assert ntz.build_busybar_frames({}) == []
 
     def test_non_ascii_is_folded(self):
         assert ntz._ascii("Přijatelný") == "Prijatelny"
@@ -589,6 +613,50 @@ class TestBusyBar:
             rot.tick(1101)
         texts = [next(e for e in c.args[0]["elements"] if e["id"] == "big")["text"] for c in push.call_args_list]
         assert texts == ["5.0", "--"]
+
+    def test_lone_screen_is_not_redrawn_while_unchanged(self):
+        rot = ntz._BusyBarRotator()
+        rot._values, rot._stamp = {"netatmo_outdoor_temp": 5.0}, 1000.0
+        with patch.object(ntz, "push_to_busybar", return_value=True) as push:
+            assert rot.tick(1001) and rot.tick(1009) and rot.tick(1017)
+            assert push.call_count == 1
+            assert rot.tick(1001 + ntz._STATIC_TTL / 2 + 1)         # the first one is about to expire
+            assert push.call_count == 2
+            rot._values = {"netatmo_outdoor_temp": 6.0}             # new reading: drawn at once
+            assert rot.tick(1100) and push.call_count == 3
+
+    def test_failed_draw_is_retried_on_the_next_tick(self):
+        rot = ntz._BusyBarRotator()
+        rot._values, rot._stamp = {"netatmo_outdoor_temp": 5.0}, 1000.0
+        with patch.object(ntz, "push_to_busybar", return_value=False) as push:
+            rot.tick(1001)
+            rot.tick(1009)
+        assert push.call_count == 2
+
+    def test_once_mode_draws_synchronously_without_a_thread(self):
+        rot = ntz._BusyBarRotator(background=False)
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
+             patch.object(ntz, "push_to_busybar", return_value=True) as push:
+            rot.update(self.VALUES)
+        assert push.call_count == 1 and rot._thread is None
+
+    def test_main_once_switches_the_bar_to_synchronous_drawing(self):
+        with patch.object(ntz, "run_once", return_value=True), \
+             patch.object(ntz.busybar, "background", True):
+            assert ntz.main(["--once"]) == 0
+            assert ntz.busybar.background is False
+            ntz.busybar.background = True
+
+    def test_startup_warns_about_a_missing_token(self, caplog):
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch.object(ntz, "BUSYBAR_TOKEN", ""), \
+             caplog.at_level("INFO"):
+            ntz.check_busybar_config()
+        assert any(r.levelname == "WARNING" and "BUSYBAR_TOKEN" in r.message for r in caplog.records)
+
+    def test_startup_is_silent_when_the_bar_is_off(self, caplog):
+        with patch.object(ntz, "BUSYBAR_URL", ""), caplog.at_level("INFO"):
+            ntz.check_busybar_config()
+        assert not [r for r in caplog.records if "BUSY Bar" in r.message]
 
     def test_rotator_starts_no_thread_when_disabled(self):
         rot = ntz._BusyBarRotator()
