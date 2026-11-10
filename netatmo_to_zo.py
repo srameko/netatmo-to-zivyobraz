@@ -93,6 +93,7 @@ BUSYBAR_URL      = os.environ.get("BUSYBAR_URL", "").rstrip("/")
 BUSYBAR_TOKEN    = _secret("BUSYBAR_TOKEN", "")
 BUSYBAR_PRIORITY = min(100, max(1, int(os.environ.get("BUSYBAR_PRIORITY", "50"))))   # 10 built-in apps, 90 BUSY/CUSTOM session
 BUSYBAR_ROTATE_SEC = max(1, int(os.environ.get("BUSYBAR_ROTATE_SEC", "8")))   # seconds each screen stays
+BUSYBAR_GLANCE_MIN = max(1, int(os.environ.get("BUSYBAR_GLANCE_MIN", "16")))   # minutes between glances
 BUSYBAR_APP      = "netatmo"
 
 HTTP_TIMEOUT      = (5, 15)   # (connect, read) seconds
@@ -866,7 +867,6 @@ _WINDOW_XPM = (
 _ROOM_NAMES = {"indoor": "uvnitr"}   # the station's own module has no HOMECOACH_MAP slug
 _Z_BG, _Z_FG = 1000, 1001            # our frame covers whatever another app left on the display
 _TEMP_X = 14                         # temperature starts here: a few pixels clear of the icon
-_STATIC_TTL = 120                    # a lone screen (nothing to rotate) stays this long without a redraw
 
 
 def _is_number(value) -> bool:
@@ -893,6 +893,16 @@ def _co2_color(value) -> str:
     if not _is_number(value):
         return "#808080FF"
     return "#4ADE80FF" if value < 800 else "#FACC15FF" if value < 1200 else "#F87171FF"
+
+
+def _is_raining(values: dict) -> bool:
+    rain = values.get("netatmo_rain_current")
+    return _is_number(rain) and rain > 0
+
+
+def _alert_state(values: dict) -> tuple[bool, bool]:
+    """(it rains, some room needs airing): what makes a glance worth showing at once."""
+    return _is_raining(values), bool(_rooms_to_air(values))
 
 
 def _rooms_to_air(values: dict) -> list[tuple[str, int]]:
@@ -933,8 +943,7 @@ def build_busybar_frames(values: dict) -> list[dict]:
     if temp == "-0.0":
         temp = "0.0"
     if temp:
-        raining = _is_number(values.get("netatmo_rain_current")) and values["netatmo_rain_current"] > 0
-        if raining:
+        if _is_raining(values):
             pic = el("pic", "xpmbitmap", 1, 3, data=_RAIN_XPM)
         elif _is_number(temp_val) and round(temp_val, 1) < 0:   # by the shown reading: "0.0" is no frost
             pic = el("pic", "xpmbitmap", 1, 4, data=_FROST_XPM)       # frost: a snowflake instead of the thermometer
@@ -961,8 +970,8 @@ def build_busybar_frames(values: dict) -> list[dict]:
                scroll_rate=1500, scroll_start_delay=1500, scroll_repeat_delay=2500),
             el("s2", "text", 14, 8, text=" ", font="small"),
         ))
-    # every frame is redrawn every len(frames) * BUSYBAR_ROTATE_SEC; a lone one much less often
-    ttl = max(3 * BUSYBAR_ROTATE_SEC, 30) if len(frames) > 1 else _STATIC_TTL
+    # a screen is replaced or cleared after BUSYBAR_ROTATE_SEC; the timeout only covers a container that dies midway
+    ttl = 2 * BUSYBAR_ROTATE_SEC + 5
     for f in frames:
         for e in f["elements"]:
             e["timeout"] = ttl
@@ -980,16 +989,19 @@ def _bar_report(state: str, level: int, message: str) -> None:
     _bar_state = state
 
 
+def _bar_headers() -> dict:
+    # cloud API takes a Bearer token, the local (LAN) API an X-API-Token header
+    auth = ({"Authorization": f"Bearer {BUSYBAR_TOKEN}"} if urlsplit(BUSYBAR_URL).hostname == "api.busy.app"
+            else {"X-API-Token": BUSYBAR_TOKEN})
+    return {**auth, "User-Agent": "netatmo-to-zivyobraz"}   # Cloudflare blocks python-requests' default
+
+
 def push_to_busybar(payload: dict) -> bool:
     """Draw one frame. Never raises; a failure never affects the Zivy obraz push."""
     if not BUSYBAR_URL:
         return False
-    # cloud API takes a Bearer token, the local (LAN) API an X-API-Token header
-    auth = ({"Authorization": f"Bearer {BUSYBAR_TOKEN}"} if urlsplit(BUSYBAR_URL).hostname == "api.busy.app"
-            else {"X-API-Token": BUSYBAR_TOKEN})
-    headers = {**auth, "User-Agent": "netatmo-to-zivyobraz"}   # Cloudflare blocks python-requests' default
     try:
-        http_request("post", f"{BUSYBAR_URL}/display/draw", json=payload, headers=headers,
+        http_request("post", f"{BUSYBAR_URL}/display/draw", json=payload, headers=_bar_headers(),
                      timeout=HTTP_TIMEOUT, retry=False)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 409:
@@ -1004,19 +1016,37 @@ def push_to_busybar(payload: dict) -> bool:
     return True
 
 
+def clear_busybar() -> None:
+    """Take our screens off the display so the app underneath (e.g. the clock) is visible again."""
+    if not BUSYBAR_URL:
+        return
+    try:
+        http_request("delete", f"{BUSYBAR_URL}/display/draw", params={"application_name": BUSYBAR_APP},
+                     headers=_bar_headers(), timeout=HTTP_TIMEOUT, retry=False)
+    except Exception as e:          # nothing of ours on screen (400) or the Bar is away: the timeout clears it anyway
+        log.debug("BUSY Bar clear: %s", _describe(e))
+
+
 class _BusyBarRotator:
-    """Redraws the Bar every BUSYBAR_ROTATE_SEC, one screen after another, from the latest values."""
+    """Shows the Bar's screens now and then, and gives the display back in between.
+
+    A glance shows each screen for BUSYBAR_ROTATE_SEC and then clears our elements, so the app that was
+    running (the clock) is untouched except for those few seconds. A glance starts when the first readings
+    arrive, every BUSYBAR_GLANCE_MIN minutes after that, and at once when it starts to rain or a room starts
+    to need airing. A busy or unreachable Bar is tried again a minute later.
+    """
 
     def __init__(self, background: bool = True):
-        self.background = background     # False (--once): draw right in update(), no thread outliving the run
+        self.background = background     # False (--once): one glance right in update(), no thread outliving the run
         self._lock = threading.Lock()
-        self._last_frame: dict | None = None
-        self._last_push = 0.0
         self._values: dict | None = None
         self._expiry: dict[str, float] = {}
         self._stamp = 0.0
         self._thread: threading.Thread | None = None
-        self._step = 0
+        self._next_glance = 0.0          # epoch seconds; 0 = as soon as there is something to show
+        self._alerts = (False, False)    # (raining, a room needs airing) as of the last readings
+        self._queue: list[dict] = []     # screens of the glance in progress, still to be drawn
+        self._showing = False
 
     def update(self, values: dict, expiry: dict[str, float] | None = None, now: float | None = None) -> None:
         """New readings. `expiry` maps value keys to the time their reading turns stale (see measurement_expiry)."""
@@ -1026,34 +1056,64 @@ class _BusyBarRotator:
             self._values = dict(values)
             self._expiry = dict(expiry or {})
             self._stamp = time.time() if now is None else now
+            alerts = _alert_state(values)
+            if any(new and not old for new, old in zip(alerts, self._alerts)):   # it just started to rain / to need airing
+                self._next_glance = 0.0
+            self._alerts = alerts
             if self.background and self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="busybar", daemon=True)
                 self._thread.start()
         if not self.background:
-            self.tick(time.time())
+            self._glance_blocking(time.time())
 
-    def tick(self, now: float) -> bool:
-        """One redraw. Readings past their deadline are shown as stale (like the Zivy obraz push does); no data
-        or data not renewed for STALE_AFTER_MIN leaves the Bar alone (it expires on its own)."""
+    def _readings(self, now: float) -> dict | None:
+        """The latest values with aged readings shown as stale; None when there is no fresh data."""
         with self._lock:
             values, stamp, expiry = self._values, self._stamp, self._expiry
         if values is None or now - stamp > STALE_AFTER_MIN * 60:
-            return False
+            return None
         aged = {k for k, deadline in expiry.items() if now >= deadline and k in values}
         if aged:
             values = dict(values)
             apply_stale(values, aged)
-        frames = build_busybar_frames(values)
+        return values
+
+    def tick(self, now: float) -> bool:
+        """One step: idle (no request), start a glance, show its next screen or give the display back."""
+        if self._showing:
+            if self._queue:
+                if push_to_busybar(self._queue.pop(0)):
+                    return True
+                self._queue, self._showing = [], False          # busy or away: stop and try again in a minute
+                self._next_glance = now + 60
+                clear_busybar()
+                return False
+            self._showing = False
+            clear_busybar()
+            return True
+        if now < self._next_glance:
+            return False
+        values = self._readings(now)
+        frames = build_busybar_frames(values) if values is not None else []
+        self._next_glance = now + BUSYBAR_GLANCE_MIN * 60
         if not frames:
             return False
-        frame = frames[self._step % len(frames)]
-        self._step += 1
-        if len(frames) == 1 and frame == self._last_frame and now - self._last_push < _STATIC_TTL / 2:
-            return True     # nothing to rotate and the same picture is still on the Bar: no request
-        ok = push_to_busybar(frame)
-        if ok:
-            self._last_frame, self._last_push = frame, now
-        return ok
+        if not push_to_busybar(frames[0]):
+            self._next_glance = now + 60
+            return False
+        self._queue, self._showing = frames[1:], True
+        return True
+
+    def _glance_blocking(self, now: float) -> None:
+        """--once: the whole glance right here (no thread that the exiting process would cut short)."""
+        values = self._readings(now)
+        frames = build_busybar_frames(values) if values is not None else []
+        for frame in frames:
+            if not push_to_busybar(frame):
+                return
+            _stop.wait(BUSYBAR_ROTATE_SEC)
+        if frames:
+            clear_busybar()
 
     def _run(self) -> None:
         while not _stop.is_set():
@@ -1232,8 +1292,9 @@ def check_busybar_config() -> None:
     if BUSYBAR_URL and not BUSYBAR_TOKEN:
         log.warning("BUSY Bar: BUSYBAR_URL is set but BUSYBAR_TOKEN is empty, every draw will be refused")
     elif BUSYBAR_URL:
-        log.info("BUSY Bar output on: %s, priority %d, screens change every %d s",
-                 _safe_url(BUSYBAR_URL), BUSYBAR_PRIORITY, BUSYBAR_ROTATE_SEC)
+        log.info("BUSY Bar output on: %s, priority %d, a glance every %d min (%d s per screen) and when it starts "
+                 "to rain or a room needs airing", _safe_url(BUSYBAR_URL), BUSYBAR_PRIORITY,
+                 BUSYBAR_GLANCE_MIN, BUSYBAR_ROTATE_SEC)
 
 
 def main(argv: list[str] | None = None) -> int:
