@@ -122,7 +122,8 @@ elements, it never clears other apps'). Elements carry a relative `timeout` (the
 with the container's) as a safety net, so a container that dies midway leaves the Bar clean within seconds. Every
 reading is shown as stale (`STALE_VALUE`) once it is `STALE_AFTER_MIN` old, and nothing is drawn when no fresh data
 has arrived for that long. The Bar gets the readings even when the Živý obraz push fails, and never affects it or the
-heartbeat. With `--once` the glance is shown before the process exits (no background thread). At startup a missing
+heartbeat. With `--once` the glance is shown before the process exits (no background thread). The `BUSYBAR_*` settings may also be Swarm secrets; a value that is not a whole number falls back to the default with a
+warning instead of stopping the container. At startup a missing
 `BUSYBAR_TOKEN` is warned about; `BUSYBAR_PRIORITY` is clamped to 1–100, `BUSYBAR_ROTATE_SEC` and `BUSYBAR_GLANCE_MIN`
 to at least 1.
 

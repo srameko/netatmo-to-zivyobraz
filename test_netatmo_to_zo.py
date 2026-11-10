@@ -800,6 +800,33 @@ class TestSecret:
             assert ntz._secret("ANY_KEY") == "file_wins"
 
 
+class TestIntSetting:
+    def test_reads_env_var(self):
+        with patch("os.path.exists", return_value=False), patch.dict(os.environ, {"X_NUM": "80"}):
+            assert ntz._int_setting("X_NUM", 50, 1, 100) == 80
+
+    def test_reads_swarm_secret_file(self):
+        with patch("os.path.exists", return_value=True), patch("builtins.open", mock_open(read_data="80\n")):
+            assert ntz._int_setting("X_NUM", 50, 1, 100) == 80
+
+    def test_default_when_unset(self):
+        env = {k: v for k, v in os.environ.items() if k != "X_NUM"}
+        with patch("os.path.exists", return_value=False), patch.dict(os.environ, env, clear=True):
+            assert ntz._int_setting("X_NUM", 50, 1, 100) == 50
+
+    @pytest.mark.parametrize("raw,expected", [("0", 1), ("-5", 1), ("250", 100), ("100", 100)])
+    def test_clamped(self, raw, expected):
+        with patch("os.path.exists", return_value=False), patch.dict(os.environ, {"X_NUM": raw}):
+            assert ntz._int_setting("X_NUM", 50, 1, 100) == expected
+
+    @pytest.mark.parametrize("raw", ["/run/secrets/BUSYBAR_PRIORITY", "high", "", "7.5"])
+    def test_not_a_number_falls_back_to_the_default_instead_of_crashing(self, raw, caplog):
+        with patch("os.path.exists", return_value=False), patch.dict(os.environ, {"X_NUM": raw}), \
+             caplog.at_level("WARNING"):
+            assert ntz._int_setting("X_NUM", 50, 1, 100) == 50
+        assert any("X_NUM" in r.message and "not a whole number" in r.message for r in caplog.records)
+
+
 # ── robustness: stale detection, retries, alerts, signals ─────────────────────
 
 import subprocess  # noqa: E402
