@@ -569,6 +569,27 @@ class TestBusyBar:
             assert rot.tick(1000 + ntz.STALE_AFTER_MIN * 60 + 1) is False   # stale: leave the Bar to expire
         push.assert_not_called()
 
+    def test_measurement_expiry_only_for_fresh_modules(self):
+        station = {"NAModule1": {"name": "outdoor", "stale": False, "ts": 1000.0},
+                   "NAMain": {"name": "indoor", "stale": True, "ts": 900.0}}
+        coach = {"pracovna": {"name": "pracovna", "stale": False, "ts": 2000.0}}
+        e = ntz.measurement_expiry(station, coach, None)
+        limit = ntz.STALE_AFTER_MIN * 60
+        assert e["netatmo_outdoor_temp"] == 1000 + limit
+        assert e["netatmo_pracovna_co2"] == 2000 + limit
+        assert "netatmo_indoor_co2" not in e      # already blanked when fetched
+
+    def test_rotator_shows_an_aged_reading_as_stale(self):
+        rot = ntz._BusyBarRotator()
+        rot._values, rot._stamp = {"netatmo_outdoor_temp": 5.0}, 1000.0
+        rot._expiry = {"netatmo_outdoor_temp": 1100.0}
+        with patch.object(ntz, "STALE_VALUE", "--"), \
+             patch.object(ntz, "push_to_busybar", return_value=True) as push:
+            rot.tick(1099)
+            rot.tick(1101)
+        texts = [next(e for e in c.args[0]["elements"] if e["id"] == "big")["text"] for c in push.call_args_list]
+        assert texts == ["5.0", "--"]
+
     def test_rotator_starts_no_thread_when_disabled(self):
         rot = ntz._BusyBarRotator()
         with patch.object(ntz, "BUSYBAR_URL", ""):
@@ -1126,6 +1147,18 @@ class TestIteration:
              patch.object(ntz, "push_to_zo", side_effect=err):
             assert ntz.run_once() is False
         assert not (env / "hb").exists()
+
+    def test_bar_gets_fresh_values_even_when_zivy_obraz_push_fails(self, env):
+        err = requests.HTTPError(response=_mock_response({}, 500))
+        with patch.object(ntz, "fetch_station_data", return_value=_station()), \
+             patch.object(ntz.time, "time", return_value=NOW), \
+             patch.object(ntz, "push_to_zo", side_effect=err), \
+             patch.object(ntz.busybar, "update") as update:
+            assert ntz.run_once() is False
+        values, expiry = update.call_args.args
+        assert values["netatmo_outdoor_temp"] == 18.2
+        assert expiry["netatmo_outdoor_temp"] == NOW - 60 + ntz.STALE_AFTER_MIN * 60   # measured 1 min ago
+        assert not (env / "hb").exists()            # the heartbeat still means "Zivy obraz push worked"
 
     def test_openaq_failure_does_not_drop_rest(self, env):
         with patch.object(ntz, "fetch_openaq", side_effect=lambda: {}):

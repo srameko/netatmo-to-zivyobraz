@@ -656,6 +656,25 @@ def apply_stale(values: dict, stale_keys: set) -> int:
     return len(stale_keys)
 
 
+def measurement_expiry(*infos_by_source: dict | None) -> dict[str, float]:
+    """Value key -> time (epoch s) from which its reading counts as stale.
+
+    Only readings that were fresh when fetched get a deadline: measurement time + STALE_AFTER_MIN.
+    Readings that were already stale are replaced by STALE_VALUE at fetch time and need none.
+    """
+    limit = STALE_AFTER_MIN * 60
+    expiry: dict[str, float] = {}
+    for infos in infos_by_source:
+        for key, info in (infos or {}).items():
+            if info["stale"] or info["ts"] is None:
+                continue
+            keys = STATION_MODULES[key][1] if key in STATION_MODULES else \
+                tuple(f"netatmo_{info['name']}_{f}" for f in COACH_FIELDS)
+            for k in keys:
+                expiry[k] = info["ts"] + limit
+    return expiry
+
+
 def fetch_netatmo_incident() -> str | None:
     """Active Netatmo incident touching weather/cloud/API services, from their status page. Never raises."""
     if not STATUS_API:
@@ -968,26 +987,34 @@ class _BusyBarRotator:
     def __init__(self):
         self._lock = threading.Lock()
         self._values: dict | None = None
+        self._expiry: dict[str, float] = {}
         self._stamp = 0.0
         self._thread: threading.Thread | None = None
         self._step = 0
 
-    def update(self, values: dict, now: float | None = None) -> None:
+    def update(self, values: dict, expiry: dict[str, float] | None = None, now: float | None = None) -> None:
+        """New readings. `expiry` maps value keys to the time their reading turns stale (see measurement_expiry)."""
         if not BUSYBAR_URL:
             return
         with self._lock:
             self._values = dict(values)
+            self._expiry = dict(expiry or {})
             self._stamp = time.time() if now is None else now
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="busybar", daemon=True)
                 self._thread.start()
 
     def tick(self, now: float) -> bool:
-        """One redraw; no data or data older than STALE_AFTER_MIN leaves the Bar alone (it expires on its own)."""
+        """One redraw. Readings past their deadline are shown as stale (like the Zivy obraz push does); no data
+        or data not renewed for STALE_AFTER_MIN leaves the Bar alone (it expires on its own)."""
         with self._lock:
-            values, stamp = self._values, self._stamp
+            values, stamp, expiry = self._values, self._stamp, self._expiry
         if values is None or now - stamp > STALE_AFTER_MIN * 60:
             return False
+        aged = {k for k, deadline in expiry.items() if now >= deadline and k in values}
+        if aged:
+            values = dict(values)
+            apply_stale(values, aged)
         frames = build_busybar_frames(values, now)
         if not frames:
             return False
@@ -1142,13 +1169,14 @@ def _iteration() -> bool:
     if blanked:
         log.info("%d stale values %s", blanked,
                  "omitted" if STALE_VALUE == STALE_SKIP else f"replaced by {STALE_VALUE!r}")
+    # the Bar is a separate destination: it gets the fresh values even when the Zivy obraz push fails
+    busybar.update(values, measurement_expiry(station_infos, coach_infos))
     try:
         if not push_to_zo(values):
             return False
     except Exception as e:
         _fail("Zivy obraz push", e)
         return False
-    busybar.update(values)
     write_heartbeat()
     return True
 
