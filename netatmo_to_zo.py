@@ -7,6 +7,7 @@ to Zivy obraz as custom values. Intended to run every 15 minutes.
 
 import copy
 import html
+import http.client
 import json
 import logging
 import os
@@ -18,7 +19,8 @@ import time
 import unicodedata
 from datetime import datetime, timezone
 from email.header import Header
-from urllib.parse import urlsplit
+from types import SimpleNamespace
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -1033,10 +1035,51 @@ def _bar_headers() -> dict:
     return {
         **auth,
         "User-Agent": "netatmo-to-zivyobraz",   # Cloudflare blocks python-requests' default
-        # The Bar's small HTTP server never answers a keep-alive request (requests' default): the call hangs until
-        # the read timeout. With `Connection: close` it answers at once (measured: 0.0 s against 8 s timeouts).
+        # The Bar's small HTTP server does not delimit a keep-alive answer: without this the client waits for the
+        # read timeout.
         "Connection": "close",
     }
+
+
+class BusyBarHttpError(Exception):
+    """A 4xx/5xx answer from the Bar; `response` and `log_url` are what _describe() reads."""
+
+    def __init__(self, status: int, text: str, log_url: str):
+        super().__init__(status)
+        self.response = SimpleNamespace(status_code=status, text=text)
+        self.log_url = log_url
+
+
+def _bar_call(method: str, path: str, payload: dict | None = None, query: dict | None = None) -> int:
+    """One request to the Bar; returns the status, raises BusyBarHttpError for 4xx/5xx and OSError for the rest.
+
+    Deliberately http.client, not requests: from the Raspberry Pi every `requests` call to the Bar ran into the
+    read timeout (15 s), even with `Connection: close`, while `urllib` and `http.client` got their answer in
+    0.0-0.1 s with the same headers and body (measured on the device, requests 2.34 on Python 3.16a1).
+    """
+    u = urlsplit(BUSYBAR_URL)
+    connection = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    target = f"{u.path}{path}" + (f"?{urlencode(query)}" if query else "")
+    log_url = _safe_url(f"{BUSYBAR_URL}{path}")
+    body = json.dumps(payload).encode() if payload is not None else None
+    headers = _bar_headers()
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    conn = connection(u.hostname, u.port, timeout=HTTP_TIMEOUT[1])
+    try:
+        conn.request(method, target, body=body, headers=headers)
+        response = conn.getresponse()
+        text = response.read().decode("utf-8", "replace")
+        if response.status >= 400:
+            raise BusyBarHttpError(response.status, text, log_url)
+        return response.status
+    except BusyBarHttpError:
+        raise
+    except Exception as e:
+        e.log_url = log_url          # for _describe(): where, never what was sent
+        raise
+    finally:
+        conn.close()
 
 
 def push_to_busybar(payload: dict) -> bool:
@@ -1044,10 +1087,9 @@ def push_to_busybar(payload: dict) -> bool:
     if not BUSYBAR_URL:
         return False
     try:
-        http_request("post", f"{BUSYBAR_URL}/display/draw", json=payload, headers=_bar_headers(),
-                     timeout=HTTP_TIMEOUT, retry=False)
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 409:
+        _bar_call("POST", "/display/draw", payload)
+    except BusyBarHttpError as e:
+        if e.response.status_code == 409:
             _bar_report("busy", logging.INFO, "a higher-priority app is on screen, waiting")
         else:
             _bar_report("error", logging.WARNING, f"push failed: {_describe(e)}")
@@ -1064,8 +1106,7 @@ def clear_busybar() -> None:
     if not BUSYBAR_URL:
         return
     try:
-        http_request("delete", f"{BUSYBAR_URL}/display/draw", params={"application_name": BUSYBAR_APP},
-                     headers=_bar_headers(), timeout=HTTP_TIMEOUT, retry=False)
+        _bar_call("DELETE", "/display/draw", query={"application_name": BUSYBAR_APP})
     except Exception as e:          # nothing of ours on screen (400) or the Bar is away: the timeout clears it anyway
         log.debug("BUSY Bar clear: %s", _describe(e))
 
