@@ -138,9 +138,27 @@ def _redact(text: str) -> str:
     return text
 
 
+def _cause_chain(exc: BaseException) -> str:
+    """Class names of the exceptions wrapped inside `exc`, e.g. ProtocolError>RemoteDisconnected (no messages)."""
+    names = []
+    cur: BaseException | None = exc
+    for _ in range(4):
+        inner = getattr(cur, "reason", None)
+        if not isinstance(inner, BaseException):
+            inner = next((a for a in getattr(cur, "args", ()) if isinstance(a, BaseException)), None)
+        if inner is None:
+            break
+        names.append(type(inner).__name__)
+        cur = inner
+    return ">".join(names)
+
+
 def _describe(exc: Exception) -> str:
     """One-line, secret-free description of a failure (never str(exc): it may hold the full URL)."""
     parts = [type(exc).__name__]
+    cause = _cause_chain(exc)
+    if cause:
+        parts.append(f"cause={cause}")
     resp = getattr(exc, "response", None)
     if resp is not None:
         parts.append(f"status={resp.status_code}")
@@ -1012,7 +1030,13 @@ def _bar_headers() -> dict:
     # cloud API takes a Bearer token, the local (LAN) API an X-API-Token header
     auth = ({"Authorization": f"Bearer {BUSYBAR_TOKEN}"} if urlsplit(BUSYBAR_URL).hostname == "api.busy.app"
             else {"X-API-Token": BUSYBAR_TOKEN})
-    return {**auth, "User-Agent": "netatmo-to-zivyobraz"}   # Cloudflare blocks python-requests' default
+    return {
+        **auth,
+        "User-Agent": "netatmo-to-zivyobraz",   # Cloudflare blocks python-requests' default
+        # The Bar's small HTTP server never answers a keep-alive request (requests' default): the call hangs until
+        # the read timeout. With `Connection: close` it answers at once (measured: 0.0 s against 8 s timeouts).
+        "Connection": "close",
+    }
 
 
 def push_to_busybar(payload: dict) -> bool:
@@ -1063,6 +1087,8 @@ class _BusyBarRotator:
         self._stamp = 0.0
         self._thread: threading.Thread | None = None
         self._next_glance = 0.0          # epoch seconds; 0 = as soon as there is something to show
+        self._reason = "first readings"  # why the next glance starts (for the log)
+        self._failures = 0               # glances in a row that could not be drawn
         self._alerts = (False, False)    # (raining, a room needs airing) as of the last readings
         self._queue: list[dict] = []     # screens of the glance in progress, still to be drawn
         self._showing = False
@@ -1076,8 +1102,11 @@ class _BusyBarRotator:
             self._expiry = dict(expiry or {})
             self._stamp = time.time() if now is None else now
             alerts = _alert_state(values)
-            if any(new and not old for new, old in zip(alerts, self._alerts)):   # it just started to rain / to need airing
+            started = [name for name, new, old in zip(("rain started", "airing needed"), alerts, self._alerts)
+                       if new and not old]
+            if started:                  # it just started to rain / a room just started to need airing
                 self._next_glance = 0.0
+                self._reason = " + ".join(started)
             self._alerts = alerts
             if self.background and self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="busybar", daemon=True)
@@ -1103,9 +1132,9 @@ class _BusyBarRotator:
             if self._queue:
                 if push_to_busybar(self._queue.pop(0)):
                     return True
-                self._queue, self._showing = [], False          # busy or away: stop and try again in a minute
-                self._next_glance = now + 60
+                self._queue, self._showing = [], False          # busy or away: stop and back off
                 clear_busybar()
+                self._retry_later(now)
                 return False
             self._showing = False
             clear_busybar()
@@ -1115,13 +1144,25 @@ class _BusyBarRotator:
         values = self._readings(now)
         frames = build_busybar_frames(values) if values is not None else []
         self._next_glance = now + BUSYBAR_GLANCE_MIN * 60
+        reason, self._reason = self._reason, "scheduled"
         if not frames:
             return False
+        log.info("BUSY Bar: glance (%s), %d screen(s)", reason, len(frames))
         if not push_to_busybar(frames[0]):
-            self._next_glance = now + 60
+            self._retry_later(now)
             return False
+        self._failures = 0
         self._queue, self._showing = frames[1:], True
         return True
+
+    def _retry_later(self, now: float) -> None:
+        """A glance that could not be drawn is tried again after 1, 2, 4, ... minutes, never later than a
+        regular glance. A Bar that draws but never answers must not be redrawn every minute."""
+        self._failures += 1
+        delay = min(60 * 2 ** (self._failures - 1), BUSYBAR_GLANCE_MIN * 60)
+        self._next_glance = now + delay
+        self._reason = "retry"
+        log.info("BUSY Bar: glance not drawn (%d in a row), next try in %d min", self._failures, round(delay / 60))
 
     def _glance_blocking(self, now: float) -> None:
         """--once: the whole glance right here (no thread that the exiting process would cut short)."""
