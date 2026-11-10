@@ -62,7 +62,7 @@ LOCATION_LAT              # for Open-Meteo wind fallback
 LOCATION_LON              # for Open-Meteo wind fallback
 HOMECOACH_MAP             # MAC→slug mapping, e.g. AA:BB:CC:DD:EE:FF=pracovna,...
 BUSYBAR_URL               # optional BUSY Bar output (empty = off): http://<ip>/api or https://api.busy.app/busybar
-BUSYBAR_TOKEN             # LAN password / cloud API token (Swarm secret); BUSYBAR_PRIORITY, BUSYBAR_ROTATE_SEC optional
+BUSYBAR_TOKEN             # LAN password / cloud API token (Swarm secret); BUSYBAR_PRIORITY, BUSYBAR_ROTATE_SEC, BUSYBAR_GLANCE_MIN optional
 ```
 
 Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portainer as Docker Swarm secrets under `/run/secrets/<name>`. Never committed to the repository.
@@ -86,7 +86,7 @@ Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portaine
 ## Error Handling
 
 - Netatmo token expired: refresh using refresh token, retry once, persist new token
-- Every HTTP call has a timeout and retries 5xx/429/network errors (5/15/30 s) - except the BUSY Bar draws, which never retry (the rotation thread redraws every few seconds anyway); one failing source never blocks the others; an iteration failure is one ERROR line (traceback at `LOG_LEVEL=DEBUG`)
+- Every HTTP call has a timeout and retries 5xx/429/network errors (5/15/30 s) - except the BUSY Bar draws, which never retry (a failed glance is simply tried again a minute later); one failing source never blocks the others; an iteration failure is one ERROR line (traceback at `LOG_LEVEL=DEBUG`)
 - Data older than `STALE_AFTER_MIN` is stale -> see README; alerts only on state change (state in `/data/state.json`)
 - OpenAQ unavailable: skip AQI values, continue with rest
 
