@@ -1053,9 +1053,11 @@ class BusyBarHttpError(Exception):
 def _bar_call(method: str, path: str, payload: dict | None = None, query: dict | None = None) -> int:
     """One request to the Bar; returns the status, raises BusyBarHttpError for 4xx/5xx and OSError for the rest.
 
-    Deliberately http.client, not requests: from the Raspberry Pi every `requests` call to the Bar ran into the
-    read timeout (15 s), even with `Connection: close`, while `urllib` and `http.client` got their answer in
-    0.0-0.1 s with the same headers and body (measured on the device, requests 2.34 on Python 3.16a1).
+    The body of the Bar's answer is never read on success: its `Content-Length` is padded with spaces and wrong
+    (`'16         '` for a shorter body) and it does not close the connection, so reading the body waits for the
+    read timeout although the status line came in 0.0 s and the screen was drawn. That is why every call used to
+    "fail" after 15 s (requests, urllib3 and http.client alike) and was retried; clients that stop at the status
+    line (urllib's `.status`) never noticed.
     """
     u = urlsplit(BUSYBAR_URL)
     connection = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
@@ -1069,8 +1071,14 @@ def _bar_call(method: str, path: str, payload: dict | None = None, query: dict |
     try:
         conn.request(method, target, body=body, headers=headers)
         response = conn.getresponse()
-        text = response.read().decode("utf-8", "replace")
         if response.status >= 400:
+            text = ""
+            if conn.sock is not None:    # what has already arrived, briefly: the Content-Length is not to be trusted
+                conn.sock.settimeout(1.0)
+                try:
+                    text = response.read1(512).decode("utf-8", "replace")
+                except (OSError, http.client.HTTPException):
+                    pass
             raise BusyBarHttpError(response.status, text, log_url)
         return response.status
     except BusyBarHttpError:

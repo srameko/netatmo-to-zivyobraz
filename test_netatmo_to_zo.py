@@ -543,12 +543,17 @@ class TestBusyBar:
         ntz._bar_state = "unknown"
 
     @staticmethod
-    def _http(status=200, body=b"{}", raises=None):
-        """A stand-in for http.client.HTTPConnection: (class, instance)."""
+    def _http(status=200, body=b"{}", raises=None, body_read_raises=None):
+        """A stand-in for http.client.HTTPConnection: (class, instance). conn.getresponse() is the answer."""
         conn = MagicMock()
         if raises is not None:
             conn.request.side_effect = raises
-        conn.getresponse.return_value = MagicMock(status=status, read=MagicMock(return_value=body))
+        response = MagicMock(status=status)
+        if body_read_raises is not None:
+            response.read1.side_effect = body_read_raises
+        else:
+            response.read1.return_value = body
+        conn.getresponse.return_value = response
         return MagicMock(return_value=conn), conn
 
     def test_disabled_without_url(self):
@@ -570,6 +575,31 @@ class TestBusyBar:
         assert headers["Content-Type"] == "application/json"
         assert json.loads(conn.request.call_args.kwargs["body"])["application_name"] == "netatmo"
         conn.close.assert_called_once()
+
+    def test_the_body_of_a_successful_answer_is_never_read(self):
+        # the Bar's Content-Length is wrong ("16         " for a shorter body) and it keeps the connection open:
+        # reading the body waits for the timeout although the screen was drawn (verified on the device)
+        cls, conn = self._http()
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls):
+            assert ntz.push_to_busybar(self._frames()[0]) is True
+        response = conn.getresponse.return_value
+        response.read.assert_not_called()
+        response.read1.assert_not_called()
+
+    def test_an_error_takes_only_what_has_already_arrived(self):
+        cls, conn = self._http(status=403, body=b'{"error":"Forbidden"}')
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls):
+            ntz.push_to_busybar(self._frames()[0])
+        conn.sock.settimeout.assert_called_with(1.0)          # never wait long for a body
+        conn.getresponse.return_value.read.assert_not_called()  # read() would wait for the promised length
+
+    def test_a_409_without_any_body_is_still_a_409(self):
+        cls, _ = self._http(status=409, body_read_raises=TimeoutError("no body"))
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \
+             patch.object(ntz, "_fail") as fail:
+            assert ntz.push_to_busybar(self._frames()[0]) is False
+        fail.assert_not_called()
+        assert ntz._bar_state == "busy"
 
     def test_every_request_asks_the_bar_to_close_the_connection(self):
         cls, conn = self._http()
