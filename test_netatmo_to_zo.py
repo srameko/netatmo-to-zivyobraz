@@ -556,6 +556,16 @@ class TestBusyBar:
         assert post.call_args[1]["headers"]["X-API-Token"] == "pw"
         assert "Authorization" not in post.call_args[1]["headers"]
 
+    def test_every_request_asks_the_bar_to_close_the_connection(self):
+        # without it the Bar's server never answers (verified on the device: keep-alive times out, close takes 0.0 s)
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch.object(ntz, "BUSYBAR_TOKEN", "pw"), \
+             patch("requests.post", return_value=_mock_response({})) as post, \
+             patch("requests.delete", return_value=_mock_response({})) as delete:
+            ntz.push_to_busybar(self._frames()[0])
+            ntz.clear_busybar()
+        assert post.call_args[1]["headers"]["Connection"] == "close"
+        assert delete.call_args[1]["headers"]["Connection"] == "close"
+
     def test_cloud_uses_bearer(self):
         with patch.object(ntz, "BUSYBAR_URL", "https://api.busy.app/busybar"), \
              patch.object(ntz, "BUSYBAR_TOKEN", "tok"), \

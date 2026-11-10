@@ -1030,7 +1030,13 @@ def _bar_headers() -> dict:
     # cloud API takes a Bearer token, the local (LAN) API an X-API-Token header
     auth = ({"Authorization": f"Bearer {BUSYBAR_TOKEN}"} if urlsplit(BUSYBAR_URL).hostname == "api.busy.app"
             else {"X-API-Token": BUSYBAR_TOKEN})
-    return {**auth, "User-Agent": "netatmo-to-zivyobraz"}   # Cloudflare blocks python-requests' default
+    return {
+        **auth,
+        "User-Agent": "netatmo-to-zivyobraz",   # Cloudflare blocks python-requests' default
+        # The Bar's small HTTP server never answers a keep-alive request (requests' default): the call hangs until
+        # the read timeout. With `Connection: close` it answers at once (measured: 0.0 s against 8 s timeouts).
+        "Connection": "close",
+    }
 
 
 def push_to_busybar(payload: dict) -> bool:
