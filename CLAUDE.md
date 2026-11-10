@@ -7,6 +7,7 @@ Single Docker container running on Raspberry Pi 5. Fetches environmental data ev
 ```
 Netatmo API   → indoor/outdoor sensor data → Živý obraz
 OpenAQ API    → AQI from ČHMÚ station Brno - Dětská nemocnice → Živý obraz
+Netatmo API   → outdoor temperature/humidity/rain + CO2 per room → BUSY Bar front screen (optional, own thread)
 ```
 
 **Weather forecast text (Alojz style)** is handled natively by the Živý obraz platform via the YrNoProvider integration (`lovecka.info`). This is NOT part of this container — configure it directly in the Živý obraz editor as a native widget.
@@ -60,6 +61,8 @@ OPENAQ_API_KEY            # OpenAQ v3 API key (openaq.org)
 LOCATION_LAT              # for Open-Meteo wind fallback
 LOCATION_LON              # for Open-Meteo wind fallback
 HOMECOACH_MAP             # MAC→slug mapping, e.g. AA:BB:CC:DD:EE:FF=pracovna,...
+BUSYBAR_URL               # optional BUSY Bar output (empty = off): http://<ip>/api or https://api.busy.app/busybar
+BUSYBAR_TOKEN             # LAN password / cloud API token (Swarm secret); BUSYBAR_PRIORITY, BUSYBAR_ROTATE_SEC optional
 ```
 
 Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portainer as Docker Swarm secrets under `/run/secrets/<name>`. Never committed to the repository.
@@ -83,7 +86,7 @@ Secrets (`NETATMO_*`, `ZO_IMPORT_KEY`, `OPENAQ_API_KEY`) are managed in Portaine
 ## Error Handling
 
 - Netatmo token expired: refresh using refresh token, retry once, persist new token
-- Every HTTP call has a timeout and retries 5xx/429/network errors (5/15/30 s); one failing source never blocks the others; an iteration failure is one ERROR line (traceback at `LOG_LEVEL=DEBUG`)
+- Every HTTP call has a timeout and retries 5xx/429/network errors (5/15/30 s) - except the BUSY Bar draws, which never retry (the rotation thread redraws every few seconds anyway); one failing source never blocks the others; an iteration failure is one ERROR line (traceback at `LOG_LEVEL=DEBUG`)
 - Data older than `STALE_AFTER_MIN` is stale -> see README; alerts only on state change (state in `/data/state.json`)
 - OpenAQ unavailable: skip AQI values, continue with rest
 
