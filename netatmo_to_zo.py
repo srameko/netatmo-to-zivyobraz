@@ -40,6 +40,25 @@ def _secret(name: str, default: str | None = None) -> str:
     return os.environ[name]
 
 
+def _int_setting(name: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
+    """Integer setting from a Swarm secret or an env var, clamped to lo..hi.
+
+    A value that is not a number (a typo, a path left in the wrong variable) falls back to the default with
+    a warning: a setting of an optional feature must never keep the whole container from starting.
+    """
+    raw = _secret(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("%s=%r is not a whole number, using %d", name, raw, default)
+        return default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
 NETATMO_CLIENT_ID     = _secret("NETATMO_CLIENT_ID")
 NETATMO_CLIENT_SECRET = _secret("NETATMO_CLIENT_SECRET")
 NETATMO_REFRESH_TOKEN = _secret("NETATMO_REFRESH_TOKEN")
@@ -89,11 +108,11 @@ STATUS_SERVICES = re.compile(r"weather|homecoach|3rd party|cloud", re.I)
 
 # optional BUSY Bar output (empty URL = off), e.g. http://192.168.5.196/api (LAN, password)
 # or https://api.busy.app/busybar (cloud, API token)
-BUSYBAR_URL      = os.environ.get("BUSYBAR_URL", "").rstrip("/")
+BUSYBAR_URL      = _secret("BUSYBAR_URL", "").rstrip("/")
 BUSYBAR_TOKEN    = _secret("BUSYBAR_TOKEN", "")
-BUSYBAR_PRIORITY = min(100, max(1, int(os.environ.get("BUSYBAR_PRIORITY", "50"))))   # 10 built-in apps, 90 BUSY/CUSTOM session
-BUSYBAR_ROTATE_SEC = max(1, int(os.environ.get("BUSYBAR_ROTATE_SEC", "8")))   # seconds each screen stays
-BUSYBAR_GLANCE_MIN = max(1, int(os.environ.get("BUSYBAR_GLANCE_MIN", "16")))   # minutes between glances
+BUSYBAR_PRIORITY = _int_setting("BUSYBAR_PRIORITY", 50, 1, 100)   # 10 built-in apps, 90 BUSY/CUSTOM session
+BUSYBAR_ROTATE_SEC = _int_setting("BUSYBAR_ROTATE_SEC", 8, 1)     # seconds each screen is shown in a glance
+BUSYBAR_GLANCE_MIN = _int_setting("BUSYBAR_GLANCE_MIN", 16, 1)    # minutes between glances
 BUSYBAR_APP      = "netatmo"
 
 HTTP_TIMEOUT      = (5, 15)   # (connect, read) seconds
