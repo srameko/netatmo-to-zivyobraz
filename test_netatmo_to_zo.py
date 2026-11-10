@@ -542,54 +542,84 @@ class TestBusyBar:
     def _fresh_state(self):
         ntz._bar_state = "unknown"
 
+    @staticmethod
+    def _http(status=200, body=b"{}", raises=None):
+        """A stand-in for http.client.HTTPConnection: (class, instance)."""
+        conn = MagicMock()
+        if raises is not None:
+            conn.request.side_effect = raises
+        conn.getresponse.return_value = MagicMock(status=status, read=MagicMock(return_value=body))
+        return MagicMock(return_value=conn), conn
+
     def test_disabled_without_url(self):
-        with patch.object(ntz, "BUSYBAR_URL", ""), patch("requests.post") as post:
+        cls, conn = self._http()
+        with patch.object(ntz, "BUSYBAR_URL", ""), patch("http.client.HTTPConnection", cls):
             assert ntz.push_to_busybar(self._frames()[0]) is False
-        post.assert_not_called()
+        conn.request.assert_not_called()
 
     def test_lan_uses_x_api_token(self):
-        with patch.object(ntz, "BUSYBAR_URL", "http://192.168.5.196/api"), \
-             patch.object(ntz, "BUSYBAR_TOKEN", "pw"), \
-             patch("requests.post", return_value=_mock_response({})) as post:
+        cls, conn = self._http()
+        with patch.object(ntz, "BUSYBAR_URL", "http://192.168.5.196/api"), patch.object(ntz, "BUSYBAR_TOKEN", "pw"), \
+             patch("http.client.HTTPConnection", cls):
             assert ntz.push_to_busybar(self._frames()[0]) is True
-        assert post.call_args[0][0] == "http://192.168.5.196/api/display/draw"
-        assert post.call_args[1]["headers"]["X-API-Token"] == "pw"
-        assert "Authorization" not in post.call_args[1]["headers"]
+        assert cls.call_args.args[:2] == ("192.168.5.196", None)
+        method, target = conn.request.call_args.args
+        headers = conn.request.call_args.kwargs["headers"]
+        assert (method, target) == ("POST", "/api/display/draw")
+        assert headers["X-API-Token"] == "pw" and "Authorization" not in headers
+        assert headers["Content-Type"] == "application/json"
+        assert json.loads(conn.request.call_args.kwargs["body"])["application_name"] == "netatmo"
+        conn.close.assert_called_once()
 
     def test_every_request_asks_the_bar_to_close_the_connection(self):
-        # without it the Bar's server never answers (verified on the device: keep-alive times out, close takes 0.0 s)
+        cls, conn = self._http()
         with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch.object(ntz, "BUSYBAR_TOKEN", "pw"), \
-             patch("requests.post", return_value=_mock_response({})) as post, \
-             patch("requests.delete", return_value=_mock_response({})) as delete:
+             patch("http.client.HTTPConnection", cls):
             ntz.push_to_busybar(self._frames()[0])
             ntz.clear_busybar()
-        assert post.call_args[1]["headers"]["Connection"] == "close"
-        assert delete.call_args[1]["headers"]["Connection"] == "close"
+        assert [c.kwargs["headers"]["Connection"] for c in conn.request.call_args_list] == ["close", "close"]
 
-    def test_cloud_uses_bearer(self):
+    def test_cloud_uses_https_and_bearer(self):
+        cls, conn = self._http()
         with patch.object(ntz, "BUSYBAR_URL", "https://api.busy.app/busybar"), \
-             patch.object(ntz, "BUSYBAR_TOKEN", "tok"), \
-             patch("requests.post", return_value=_mock_response({})) as post:
+             patch.object(ntz, "BUSYBAR_TOKEN", "tok"), patch("http.client.HTTPSConnection", cls):
             ntz.push_to_busybar(self._frames()[0])
-        assert post.call_args[1]["headers"]["Authorization"] == "Bearer tok"
+        assert conn.request.call_args.args == ("POST", "/busybar/display/draw")
+        assert conn.request.call_args.kwargs["headers"]["Authorization"] == "Bearer tok"
 
     def test_409_is_not_an_error(self):
-        resp = MagicMock(status_code=409)
-        bad = MagicMock(raise_for_status=MagicMock(side_effect=requests.HTTPError(response=resp)))
-        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
-             patch("requests.post", return_value=bad), \
+        cls, _ = self._http(status=409, body=b'{"error":"Not drawn due to low priority"}')
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \
              patch.object(ntz, "_fail") as fail:
             assert ntz.push_to_busybar(self._frames()[0]) is False
         fail.assert_not_called()
+        assert ntz._bar_state == "busy"
+
+    def test_other_http_errors_are_logged_with_status_and_body(self, caplog):
+        cls, _ = self._http(status=403, body=b'{"error":"Forbidden"}')
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \
+             caplog.at_level("WARNING"):
+            assert ntz.push_to_busybar(self._frames()[0]) is False
+        assert any("status=403" in r.message and "Forbidden" in r.message and "url=http://bar/api/display/draw"
+                   in r.message for r in caplog.records)
 
     def test_failure_never_raises(self):
-        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
-             patch("requests.post", side_effect=requests.ConnectionError("down")):
+        cls, _ = self._http(raises=ConnectionResetError("down"))
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls):
             assert ntz.push_to_busybar(self._frames()[0]) is False
 
+    def test_a_timeout_is_reported_with_the_url_and_closes_the_connection(self, caplog):
+        cls, conn = self._http(raises=TimeoutError("timed out"))
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \
+             caplog.at_level("WARNING"):
+            assert ntz.push_to_busybar(self._frames()[0]) is False
+        assert any("TimeoutError" in r.message and "url=http://bar/api/display/draw" in r.message
+                   for r in caplog.records)
+        conn.close.assert_called_once()
+
     def test_outage_is_logged_once(self, caplog):
-        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
-             patch("requests.post", side_effect=requests.ConnectionError("down")), \
+        cls, _ = self._http(raises=ConnectionResetError("down"))
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \
              caplog.at_level("INFO"):
             for _ in range(5):
                 ntz.push_to_busybar(self._frames()[0])
@@ -741,17 +771,25 @@ class TestBusyBar:
         assert self._texts(push) == ["-3.2", "Vetrejte!"] and clear.call_count == 1 and rot._thread is None
 
     def test_clear_asks_for_this_apps_elements_only(self):
+        cls, conn = self._http()
         with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch.object(ntz, "BUSYBAR_TOKEN", "pw"), \
-             patch("requests.delete", return_value=_mock_response({})) as delete:
+             patch("http.client.HTTPConnection", cls):
             ntz.clear_busybar()
-        assert delete.call_args[0][0] == "http://bar/api/display/draw"
-        assert delete.call_args[1]["params"] == {"application_name": "netatmo"}
-        assert delete.call_args[1]["headers"]["X-API-Token"] == "pw"
+        assert conn.request.call_args.args == ("DELETE", "/api/display/draw?application_name=netatmo")
+        assert conn.request.call_args.kwargs["headers"]["X-API-Token"] == "pw"
+        assert conn.request.call_args.kwargs["body"] is None
 
     def test_clear_never_raises(self):
-        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), \
-             patch("requests.delete", side_effect=requests.ConnectionError("down")):
+        cls, _ = self._http(raises=ConnectionResetError("down"))
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls):
             ntz.clear_busybar()
+
+    def test_clear_of_nothing_on_screen_is_quiet(self, caplog):
+        cls, _ = self._http(status=400, body=b'{"error":"this application_name is currently not displaying anything"}')
+        with patch.object(ntz, "BUSYBAR_URL", "http://bar/api"), patch("http.client.HTTPConnection", cls), \
+             caplog.at_level("INFO"):
+            ntz.clear_busybar()
+        assert not [r for r in caplog.records if "BUSY Bar" in r.message]
 
     def test_main_once_switches_the_bar_to_synchronous_drawing(self):
         with patch.object(ntz, "run_once", return_value=True), \
