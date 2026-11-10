@@ -436,7 +436,7 @@ class TestBusyBar:
         e = self._by_id(frame)
         assert set(e) == {"bg", "pic", "big", "s1", "s2"}
         assert e["big"]["text"] == "-3.2" and e["s1"]["text"] == "C" and e["s2"]["text"] == "81%"
-        assert e["pic"]["data"].startswith("! XPM2\n5 10 2 1\n") and "#60A5FA" in e["pic"]["data"]  # thermometer, < 5 C
+        assert e["pic"]["data"].startswith("! XPM2\n9 9 2 1\n")                  # snowflake: below zero
         assert all(x["display"] == "front" for x in frame["elements"])
         assert all(x["text"].isascii() for x in frame["elements"] if x["type"] == "text")
 
@@ -463,6 +463,16 @@ class TestBusyBar:
     def test_lone_screen_lives_longer_between_redraws(self):
         (frame,) = self._frames()
         assert all(x["timeout"] == ntz._STATIC_TTL for x in frame["elements"])
+
+    @pytest.mark.parametrize("temp,color", [(4.9, "#60A5FA"), (5.0, "#E5E5E5"), (26.9, "#E5E5E5"), (27.0, "#F87171")])
+    def test_thermometer_is_coloured_by_temperature(self, temp, color):
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": temp})[0])
+        assert e["pic"]["data"].startswith("! XPM2\n5 10 2 1\n") and color in e["pic"]["data"]
+
+    @pytest.mark.parametrize("temp,frost", [(-0.1, True), (0.0, False), (-0.04, False), ("--", False)])
+    def test_frost_icon_only_below_zero(self, temp, frost):
+        e = self._by_id(ntz.build_busybar_frames({"netatmo_outdoor_temp": temp})[0])
+        assert e["pic"]["data"].startswith("! XPM2\n9 9 2 1\n") is frost
 
     def test_rain_swaps_the_icon(self):
         e = self._by_id(self._frames(netatmo_rain_current=0.4)[0])

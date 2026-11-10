@@ -843,6 +843,12 @@ _THERMOMETER_XPM = (
     "..o..\n.ooo.\n.ooo.\n.ooo.\n.ooo.\n.ooo.\nooooo\nooooo\nooooo\n.ooo.\n"
 )
 
+# 9x9 snowflake for temperatures below zero
+_FROST_XPM = (
+    "! XPM2\n9 9 2 1\n. c none\no c #7DD3FC\n"
+    "....o....\n.o..o..o.\n..o.o.o..\n...ooo...\nooooooooo\n...ooo...\n..o.o.o..\n.o..o..o.\n....o....\n"
+)
+
 # 9x10 rain cloud with drops
 _RAIN_XPM = (
     "! XPM2\n9 10 3 1\n. c none\nc c #9CA3AF\nb c #60A5FA\n"
@@ -928,8 +934,12 @@ def build_busybar_frames(values: dict) -> list[dict]:
         temp = "0.0"
     if temp:
         raining = _is_number(values.get("netatmo_rain_current")) and values["netatmo_rain_current"] > 0
-        pic = (el("pic", "xpmbitmap", 1, 3, data=_RAIN_XPM) if raining else
-               el("pic", "xpmbitmap", 3, 3, data=_THERMOMETER_XPM.format(color=_temp_color(temp_val))))
+        if raining:
+            pic = el("pic", "xpmbitmap", 1, 3, data=_RAIN_XPM)
+        elif _is_number(temp_val) and round(temp_val, 1) < 0:   # by the shown reading: "0.0" is no frost
+            pic = el("pic", "xpmbitmap", 1, 4, data=_FROST_XPM)       # frost: a snowflake instead of the thermometer
+        else:
+            pic = el("pic", "xpmbitmap", 3, 3, data=_THERMOMETER_XPM.format(color=_temp_color(temp_val)))
         hum = _bar_text(values.get("netatmo_outdoor_humidity"), "{:.0f}%")
         room_until = 72 - _hum_width(hum) - 2 if hum else 72      # the unit must not touch the humidity
         unit_x = _TEMP_X + _bold_width(temp) + 1
