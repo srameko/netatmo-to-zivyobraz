@@ -1,12 +1,12 @@
 # ---- builder: install deps into an isolated directory ----
-FROM python:3.16.0a1-alpine AS builder
+FROM python:3.16.0a2-alpine AS builder
 
 WORKDIR /install
 COPY requirements.txt .
 RUN pip install --no-cache-dir --target=/install -r requirements.txt
 
 # ---- final: clean Alpine Python, no pip, no cache ----
-FROM python:3.16.0a1-alpine
+FROM python:3.16.0a2-alpine
 
 RUN apk upgrade --no-cache
 
