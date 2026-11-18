@@ -1245,7 +1245,7 @@ class TestCallmebot:
 class TestTelegram:
     def _send(self, side_effect=None):
         with patch.object(ntz, "NTFY_URL", ""), patch.object(ntz, "ALERT_WEBHOOK_URL", ""), \
-             patch.object(ntz, "CALLMEBOT_PHONE", ""), \
+             patch.object(ntz, "CALLMEBOT_PHONE", ""), patch.object(ntz, "RETRY_DELAYS", (0, 0, 0)), \
              patch.object(ntz, "TELEGRAM_BOT_TOKEN", "123456:ABCdef"), patch.object(ntz, "TELEGRAM_CHAT_ID", "987654"), \
              patch("requests.post", return_value=_mock_response({}), side_effect=side_effect) as post:
             return ntz.send_alert("stale", "Čau"), post
@@ -1254,11 +1254,20 @@ class TestTelegram:
         ok, post = self._send()
         assert ok is True
         assert post.call_args.args[0] == "https://api.telegram.org/bot123456:ABCdef/sendMessage"
-        assert post.call_args[1]["data"]["chat_id"] == "987654"
+        assert post.call_args[1]["data"] == {"chat_id": "987654", "text": "Netatmo: zastaralá data\nČau"}
 
-    def test_failure_returns_false_and_logs_no_token(self, caplog):
-        ok, _ = self._send(side_effect=requests.ConnectionError("https://api.telegram.org/bot123456:ABCdef/sendMessage"))
-        assert ok is False
+    def test_http_error_returns_false_and_logs_no_token(self, caplog):
+        err = requests.HTTPError("401 for url: https://api.telegram.org/bot123456:ABCdef/sendMessage",
+                                 response=_mock_response({}, 401))
+        ok, post = self._send(side_effect=err)
+        assert ok is False and post.call_count == 1  # 4xx is not retried
+        assert "telegram alert failed" in caplog.text
+        assert "123456:ABCdef" not in caplog.text
+
+    def test_network_error_is_retried_and_logs_no_token(self, caplog):
+        err = requests.ConnectionError("https://api.telegram.org/bot123456:ABCdef/sendMessage")
+        ok, post = self._send(side_effect=err)
+        assert ok is False and post.call_count == 4
         assert "123456:ABCdef" not in caplog.text
 
 

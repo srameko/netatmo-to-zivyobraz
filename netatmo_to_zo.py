@@ -823,7 +823,7 @@ def send_alert(event: str, message: str) -> bool:
         configured = True
         try:
             # the bot token is part of the URL path; http_request logs only log_url
-            r = http_request("post", f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            http_request("post", f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                              log_url="telegram", data={"chat_id": TELEGRAM_CHAT_ID, "text": f"{title}\n{message}"})
             delivered = True
             log.info("Alert sent via telegram: %s", event)
