@@ -5,6 +5,7 @@ Run with: pytest test_netatmo_to_zo.py
 """
 
 import json
+import logging
 import os
 from unittest.mock import MagicMock, mock_open, patch
 
@@ -1257,14 +1258,17 @@ class TestTelegram:
         assert post.call_args[1]["data"] == {"chat_id": "987654", "text": "Netatmo: zastaralá data\nČau"}
 
     def test_http_error_returns_false_and_logs_no_token(self, caplog):
+        caplog.set_level(logging.DEBUG)  # DEBUG adds the traceback, which carries the request URL
         err = requests.HTTPError("401 for url: https://api.telegram.org/bot123456:ABCdef/sendMessage",
                                  response=_mock_response({}, 401))
         ok, post = self._send(side_effect=err)
         assert ok is False and post.call_count == 1  # 4xx is not retried
         assert "telegram alert failed" in caplog.text
+        assert "Traceback for telegram alert" in caplog.text  # still logged, just redacted
         assert "123456:ABCdef" not in caplog.text
 
     def test_network_error_is_retried_and_logs_no_token(self, caplog):
+        caplog.set_level(logging.DEBUG)
         err = requests.ConnectionError("https://api.telegram.org/bot123456:ABCdef/sendMessage")
         ok, post = self._send(side_effect=err)
         assert ok is False and post.call_count == 4

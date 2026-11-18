@@ -16,6 +16,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 import unicodedata
 from datetime import datetime, timezone
 from email.header import Header
@@ -179,7 +180,10 @@ def _describe(exc: Exception) -> str:
 
 def _fail(what: str, exc: Exception, level: int = logging.ERROR):
     log.log(level, "%s failed: %s", what, _describe(exc))
-    log.debug("Traceback for %s", what, exc_info=exc)
+    if log.isEnabledFor(logging.DEBUG):
+        # not exc_info=: raw tracebacks carry the request URL (Telegram bot token, CallMeBot key)
+        log.debug("Traceback for %s\n%s", what,
+                  _redact("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))).rstrip())
 
 
 def _retryable(exc: Exception) -> bool:
