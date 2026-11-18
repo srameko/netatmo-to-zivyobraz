@@ -16,6 +16,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 import unicodedata
 from datetime import datetime, timezone
 from email.header import Header
@@ -103,6 +104,8 @@ NTFY_TOKEN        = _secret("NTFY_TOKEN", "")
 ALERT_WEBHOOK_URL = _secret("ALERT_WEBHOOK_URL", "")
 CALLMEBOT_PHONE   = _secret("CALLMEBOT_PHONE", "")    # WhatsApp via callmebot.com, e.g. +420123456789
 CALLMEBOT_APIKEY  = _secret("CALLMEBOT_APIKEY", "")
+TELEGRAM_BOT_TOKEN = _secret("TELEGRAM_BOT_TOKEN", "")  # Telegram Bot API (BotFather token)
+TELEGRAM_CHAT_ID   = _secret("TELEGRAM_CHAT_ID", "")
 
 # Netatmo's public status page (JSON behind health.netatmo.com). "" disables the lookup.
 STATUS_API      = os.environ.get("NETATMO_STATUS_API", "https://health.netatmo.com/api").rstrip("/")
@@ -134,7 +137,8 @@ def _safe_url(url: str) -> str:
 
 def _redact(text: str) -> str:
     for secret in (NETATMO_CLIENT_SECRET, NETATMO_REFRESH_TOKEN, ZO_IMPORT_KEY, OPENAQ_API_KEY,
-                   NTFY_TOKEN, NTFY_TOPIC, ALERT_WEBHOOK_URL, CALLMEBOT_APIKEY, CALLMEBOT_PHONE):
+                   NTFY_TOKEN, NTFY_TOPIC, ALERT_WEBHOOK_URL, CALLMEBOT_APIKEY, CALLMEBOT_PHONE,
+                   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID):
         if secret and len(secret) >= 6:
             text = text.replace(secret, "***")
     return text
@@ -176,7 +180,10 @@ def _describe(exc: Exception) -> str:
 
 def _fail(what: str, exc: Exception, level: int = logging.ERROR):
     log.log(level, "%s failed: %s", what, _describe(exc))
-    log.debug("Traceback for %s", what, exc_info=exc)
+    if log.isEnabledFor(logging.DEBUG):
+        # not exc_info=: raw tracebacks carry the request URL (Telegram bot token, CallMeBot key)
+        log.debug("Traceback for %s\n%s", what,
+                  _redact("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))).rstrip())
 
 
 def _retryable(exc: Exception) -> bool:
@@ -815,6 +822,17 @@ def send_alert(event: str, message: str) -> bool:
                 log.info("Alert sent via callmebot: %s", event)
         except Exception as e:
             _fail("callmebot alert", e, logging.WARNING)
+
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        configured = True
+        try:
+            # the bot token is part of the URL path; http_request logs only log_url
+            http_request("post", f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                             log_url="telegram", data={"chat_id": TELEGRAM_CHAT_ID, "text": f"{title}\n{message}"})
+            delivered = True
+            log.info("Alert sent via telegram: %s", event)
+        except Exception as e:
+            _fail("telegram alert", e, logging.WARNING)
 
     if not configured:
         log.warning("ALERT (%s, no alert channel configured): %s", event, message)
