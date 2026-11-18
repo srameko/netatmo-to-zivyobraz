@@ -1242,6 +1242,26 @@ class TestCallmebot:
         assert "key123456" not in caplog.text and "+420111222333" not in caplog.text
 
 
+class TestTelegram:
+    def _send(self, side_effect=None):
+        with patch.object(ntz, "NTFY_URL", ""), patch.object(ntz, "ALERT_WEBHOOK_URL", ""), \
+             patch.object(ntz, "CALLMEBOT_PHONE", ""), \
+             patch.object(ntz, "TELEGRAM_BOT_TOKEN", "123456:ABCdef"), patch.object(ntz, "TELEGRAM_CHAT_ID", "987654"), \
+             patch("requests.post", return_value=_mock_response({}), side_effect=side_effect) as post:
+            return ntz.send_alert("stale", "Čau"), post
+
+    def test_posts_to_bot_api(self):
+        ok, post = self._send()
+        assert ok is True
+        assert post.call_args.args[0] == "https://api.telegram.org/bot123456:ABCdef/sendMessage"
+        assert post.call_args[1]["data"]["chat_id"] == "987654"
+
+    def test_failure_returns_false_and_logs_no_token(self, caplog):
+        ok, _ = self._send(side_effect=requests.ConnectionError("https://api.telegram.org/bot123456:ABCdef/sendMessage"))
+        assert ok is False
+        assert "123456:ABCdef" not in caplog.text
+
+
 class TestRawStationDump:
     def test_lists_flags_without_identifiers(self):
         data = _station(outdoor_dash=False)

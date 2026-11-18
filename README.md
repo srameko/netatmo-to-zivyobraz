@@ -90,6 +90,7 @@ Wind is taken from the Netatmo wind module if present, otherwise fetched from [O
 | `ALERT_REPEAT_HOURS`    |          | Reminder while stale (default `6`, `0` = no reminders) |
 | `NTFY_URL`, `NTFY_TOPIC`|          | ntfy alerts (`NTFY_TOKEN` optional bearer token)       |
 | `CALLMEBOT_PHONE`, `CALLMEBOT_APIKEY` |  | WhatsApp alerts via callmebot.com                 |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | Telegram alerts via Bot API (token from @BotFather)    |
 | `ALERT_WEBHOOK_URL`     |          | Generic webhook, receives JSON `{event,title,message}` |
 | `NETATMO_STATUS_API`    |          | Netatmo status page API (default `https://health.netatmo.com/api`, empty = off); when the station is stale, an active Weather/Cloud incident is added to the alert and log |
 | `BUSYBAR_URL`           |          | Optional [BUSY Bar](https://docs.busy.app/bar/dev/http-api) output, empty = off. LAN: `http://<ip>/api` (password in `BUSYBAR_TOKEN`, sent as `X-API-Token`); cloud: `https://api.busy.app/busybar` (BUSY API token, sent as Bearer) |
